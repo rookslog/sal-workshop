@@ -48,3 +48,16 @@ def test_d5_serves_media_with_exact_content_type(
             status, headers, _ = http("GET", url + take["media"])
             assert status == 200, extension
             assert headers["content-type"] == expected, extension
+
+
+def test_s5_favicon_is_no_content(comment_round: Path) -> None:
+    with served(comment_round) as (url, _):
+        get_status, get_headers, get_body = http("GET", url + "favicon.ico")
+        head_status, head_headers, head_body = http("HEAD", url + "favicon.ico")
+        unknown_status, _, _ = http("GET", url + "favicon.png")
+
+    assert (get_status, get_body) == (204, b"")
+    assert (head_status, head_body) == (204, b"")
+    assert "content-length" not in get_headers
+    assert "content-length" not in head_headers
+    assert unknown_status == 404

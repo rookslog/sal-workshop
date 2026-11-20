@@ -74,9 +74,7 @@
   }
 
   function rowDuration(row) {
-    return Number.isFinite(row.video.duration) && row.video.duration > 0
-      ? row.video.duration
-      : row.take.duration;
+    return Number(row.take.duration) || 0;
   }
 
   function timeToX(t, ruler) {
@@ -756,6 +754,18 @@
     return row.video.ended || isPastRowEnd(row, row.video.currentTime || 0);
   }
 
+  function hasActiveEnded(row) {
+    return Boolean(row && (row.video.ended || row.stoppedAtEnd));
+  }
+
+  function loopWrapTime(row) {
+    if (!selection) {
+      return 0;
+    }
+    const dur = rowDuration(row);
+    return dur > 0 ? Math.min(selection.end, dur) : selection.end;
+  }
+
   function stretchFitsTake(sel, row) {
     if (!sel || sel.end <= sel.start || !row) {
       return false;
@@ -771,6 +781,7 @@
       const clamped = clamp(timeSeconds, 0, duration);
       row.video.playbackRate = 1;
       row.awaitingSeekCalibration = false;
+      row.stoppedAtEnd = false;
       row.video.currentTime = clamped;
     }
     if (wasPlaying) {
@@ -785,22 +796,23 @@
     updatePlayButton();
   }
 
-  function playRowForSync(row) {
-    // WebKit truncates muted audio-only .mp3/.opus <video> elements at t=0 unless
-    // started unmuted; route through a zero-gain WebAudio node for silent startup.
-    if (
-      needsSilentWebAudioStartup &&
-      !row.hasPicture &&
-      row.index !== activeIndex &&
-      row.video.currentTime < 0.01
-    ) {
-      const gain = ensureAudioGain(row);
-      if (gain) {
-        gain.gain.value = 0;
-        row.startupUnmuted = true;
-        row.video.muted = false;
-      }
+  function prepareSilentStartup(row) {
+    // WebKit truncates muted audio-only .mp3/.opus <video> elements unless started
+    // unmuted; route through a zero-gain WebAudio node for silent startup/resume.
+    if (!needsSilentWebAudioStartup || row.hasPicture || row.index === activeIndex) {
+      return;
     }
+    const gain = ensureAudioGain(row);
+    if (gain) {
+      gain.gain.value = 0;
+      row.startupUnmuted = true;
+      row.startupStartTime = row.video.currentTime;
+      row.video.muted = false;
+    }
+  }
+
+  function playRowForSync(row) {
+    prepareSilentStartup(row);
     playVideoSafe(row.video);
   }
 
@@ -814,9 +826,90 @@
     row.video.currentTime = target;
   }
 
+  function shouldWrapLoop(current) {
+    return Boolean(
+      loopActive &&
+        selection &&
+        selection.end > selection.start &&
+        !current.video.paused &&
+        (current.video.currentTime >= loopWrapTime(current) || current.video.ended)
+    );
+  }
+
+  function clampInactiveRowAtMeasuredEnd(row) {
+    const duration = rowDuration(row);
+    if (duration <= 0) {
+      return;
+    }
+    if (row.video.currentTime >= duration) {
+      if (row.video.playbackRate !== 1) {
+        row.video.playbackRate = 1;
+      }
+      if (row.startupUnmuted) {
+        row.startupUnmuted = false;
+        row.video.muted = true;
+      }
+      if (!row.video.paused) {
+        row.video.pause();
+      }
+      if (row.video.currentTime > duration) {
+        row.video.currentTime = duration;
+      }
+      updatePlayheadForRow(row);
+    }
+  }
+
+  function stopAtMeasuredEnd() {
+    stopRaf();
+    stopSyncTimer();
+    const current = activeRow();
+    for (const r of rows) {
+      const dur = rowDuration(r);
+      r.video.playbackRate = 1;
+      r.startupUnmuted = false;
+      r.awaitingSeekCalibration = false;
+      if (!r.video.paused) {
+        r.video.pause();
+      }
+      r.video.muted = r !== current;
+      if (r.gainNode) {
+        r.video.volume = 1.0;
+        r.gainNode.gain.value = r === current ? desiredLinearGain(r) : 0;
+      }
+      if (r.video.currentTime > dur) {
+        r.video.currentTime = dur;
+      }
+    }
+    if (current) {
+      current.stoppedAtEnd = true;
+    }
+    updateAllPlayheads();
+    updateTimeReadout();
+    updatePlayButton();
+  }
+
+  function checkActiveMeasuredEnd() {
+    const current = activeRow();
+    if (!current || current.video.paused || current.video.ended) {
+      return false;
+    }
+    if (shouldWrapLoop(current)) {
+      return false;
+    }
+    const dur = rowDuration(current);
+    if (dur > 0 && current.video.currentTime >= dur) {
+      stopAtMeasuredEnd();
+      return true;
+    }
+    return false;
+  }
+
   function syncMutedTakes() {
     const master = activeRow();
     if (!master || master.video.paused || master.video.ended) {
+      return;
+    }
+    if (checkActiveMeasuredEnd()) {
       return;
     }
     if (master.video.playbackRate !== 1) {
@@ -828,12 +921,17 @@
       if (row === master) {
         continue;
       }
-      if (row.startupUnmuted && !row.video.paused && row.video.currentTime > 0.01) {
+      if (
+        row.startupUnmuted &&
+        !row.video.paused &&
+        row.video.currentTime > row.startupStartTime + 0.01
+      ) {
         row.startupUnmuted = false;
         row.video.muted = true;
       }
       const duration = rowDuration(row);
-      if (row.video.ended || masterTime >= duration - END_REST_TOLERANCE_S) {
+      clampInactiveRowAtMeasuredEnd(row);
+      if (row.video.ended || row.video.currentTime >= duration || masterTime >= duration - END_REST_TOLERANCE_S) {
         if (row.video.playbackRate !== 1) {
           row.video.playbackRate = 1;
         }
@@ -918,18 +1016,19 @@
       if (!current) {
         return;
       }
-      if (
-        loopActive &&
-        selection &&
-        selection.end > selection.start &&
-        !current.video.paused &&
-        (current.video.currentTime >= selection.end || current.video.ended)
-      ) {
+      if (shouldWrapLoop(current)) {
         seekAll(selection.start);
         for (const row of rows) {
           if (!isPastRowEnd(row, selection.start) && row.video.paused) {
             playRowForSync(row);
           }
+        }
+      } else if (checkActiveMeasuredEnd()) {
+        return;
+      }
+      for (const row of rows) {
+        if (row !== current) {
+          clampInactiveRowAtMeasuredEnd(row);
         }
       }
       updateAllPlayheads();
@@ -982,14 +1081,18 @@
       audioCtx.resume().catch(() => {});
     }
     const current = activeRow();
-    if (loopActive && selection && selection.end > selection.start) {
+    const hasLoop = Boolean(loopActive && selection && selection.end > selection.start);
+    const restartFromZero = !hasLoop && hasActiveEnded(current);
+    if (hasLoop) {
       if (
         current.video.currentTime < selection.start ||
-        current.video.currentTime >= selection.end
+        current.video.currentTime >= loopWrapTime(current)
       ) {
         seekAll(selection.start);
       }
-    } else if (!current.video.ended) {
+    } else if (restartFromZero) {
+      seekAll(0);
+    } else {
       const masterTime = current.video.currentTime;
       for (const row of rows) {
         if (
@@ -1001,22 +1104,12 @@
         }
       }
     }
-    const startTime = current.video.ended ? 0 : current.video.currentTime;
+    const startTime = restartFromZero ? 0 : current.video.currentTime;
     for (const row of rows) {
       row.video.playbackRate = 1;
-      if (
-        needsSilentWebAudioStartup &&
-        !row.hasPicture &&
-        row !== current &&
-        !isPastRowEnd(row, startTime) &&
-        row.video.currentTime < 0.01
-      ) {
-        const gain = ensureAudioGain(row);
-        if (gain) {
-          gain.gain.value = 0;
-          row.startupUnmuted = true;
-          row.video.muted = false;
-        }
+      row.stoppedAtEnd = false;
+      if (row !== current && !isPastRowEnd(row, startTime)) {
+        prepareSilentStartup(row);
       }
     }
     for (const row of rows) {
@@ -1125,7 +1218,7 @@
     if (loopActive) {
       if (
         current.video.currentTime < selection.start ||
-        current.video.currentTime >= selection.end
+        current.video.currentTime >= loopWrapTime(current)
       ) {
         seekAll(selection.start);
       }
@@ -1298,6 +1391,7 @@
       hasPicture: false,
       gainNode: null,
       startupUnmuted: false,
+      stoppedAtEnd: false,
       seekLead: 0,
       lastSeekAt: 0,
       awaitingSeekCalibration: false,
@@ -1335,10 +1429,17 @@
     });
     videoEl.addEventListener("timeupdate", () => {
       if (row.index === activeIndex && loopActive && selection && selection.end > selection.start) {
-        if (videoEl.currentTime >= selection.end) {
+        if (videoEl.currentTime >= loopWrapTime(row)) {
           seekAll(selection.start);
           return;
         }
+      }
+      if (row.index === activeIndex) {
+        if (checkActiveMeasuredEnd()) {
+          return;
+        }
+      } else {
+        clampInactiveRowAtMeasuredEnd(row);
       }
       updatePlayheadForRow(row);
       if (row.index === activeIndex) {

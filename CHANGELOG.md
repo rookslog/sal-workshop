@@ -25,3 +25,9 @@
   ends; a comment the server has stored is shown as saved even if the list cannot be read back.
 - `sal round serve` takes a free port unless `--port` names one, and says so plainly when the named
   port is in use (the old fixed default failed wherever another program held it).
+- A take's length on the page is the length the round measured, not what the browser reports: a clip
+  that carries a longer track (for instance the chapter list of the set it was cut from) no longer
+  shows a wrong length or plays past its end in WebKit; a take stops at its measured end.
+- A pause no longer ends the takes that are not heard (sound-only takes in WebKit), with or without
+  a seek or a switch while paused.
+- The server answers the browser's request for an icon (204), so Chrome's console stays empty.

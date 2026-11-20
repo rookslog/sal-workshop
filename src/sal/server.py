@@ -198,7 +198,8 @@ class _RoundRequestHandler(BaseHTTPRequestHandler):
 
     def _send_empty(self, status: int, extra_headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
-        self.send_header("Content-Length", "0")
+        if status != 204:
+            self.send_header("Content-Length", "0")
         if extra_headers:
             for key, value in extra_headers.items():
                 self.send_header(key, value)
@@ -302,6 +303,9 @@ class _RoundRequestHandler(BaseHTTPRequestHandler):
             self._send_empty(403)
             return
         route_path = urlsplit(self.path).path
+        if route_path == "/favicon.ico":
+            self._send_empty(204)
+            return
         if route_path == "/comments":
             records = [
                 record
