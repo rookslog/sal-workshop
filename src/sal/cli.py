@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from sal import __version__
+from sal.rounds import build_round, create_round
 from sal.views import render_view
 from sal.views.media import probe_tool_version
 
@@ -58,15 +59,35 @@ def _cmd_view_render(args: argparse.Namespace) -> int:
 
 
 def _cmd_round_new(args: argparse.Namespace) -> int:
-    """Create a new review round (stub)."""
-    del args
-    return _not_implemented()
+    """Create a new review round."""
+    try:
+        round_path = create_round(
+            round_id=args.id,
+            question=args.question,
+            take_specs=args.takes,
+            control=args.control,
+            view_name=args.view,
+            blind=args.blind,
+            project=args.project,
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(json.dumps({"round": round_path.as_posix()}, sort_keys=True))
+    return 0
 
 
 def _cmd_round_build(args: argparse.Namespace) -> int:
-    """Build a review round page (stub)."""
-    del args
-    return _not_implemented()
+    """Build a review round page."""
+    try:
+        build_dir, chosen_seed = build_round(Path(args.round_dir), seed=args.seed)
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(json.dumps({"build": build_dir.as_posix(), "seed": chosen_seed}, sort_keys=True))
+    return 0
 
 
 def _cmd_round_serve(args: argparse.Namespace) -> int:
@@ -131,8 +152,47 @@ def _build_parser() -> argparse.ArgumentParser:
     round_parser.set_defaults(help_parser=round_parser)
     round_sub = round_parser.add_subparsers(dest="subcommand")
     round_new_parser = round_sub.add_parser("new", help="Create a new review round.")
+    round_new_parser.add_argument("id", metavar="ID", help="Round identifier.")
+    round_new_parser.add_argument(
+        "--question", required=True, metavar="TEXT", help="Question for the reviewer."
+    )
+    round_new_parser.add_argument(
+        "--take",
+        dest="takes",
+        action="append",
+        required=True,
+        metavar="PATH[::LABEL]",
+        help="Take file path and optional label.",
+    )
+    round_new_parser.add_argument(
+        "--control",
+        required=True,
+        type=int,
+        metavar="N",
+        help="1-based index of the control take.",
+    )
+    round_new_parser.add_argument(
+        "--view", required=True, metavar="VIEW", help="View name to render for each take."
+    )
+    round_new_parser.add_argument(
+        "--blind", action="store_true", help="Hide take labels and order takes from a seed."
+    )
+    round_new_parser.add_argument(
+        "--project", default=None, metavar="NAME", help="Optional project name."
+    )
     round_new_parser.set_defaults(func=_cmd_round_new)
+
     round_build_parser = round_sub.add_parser("build", help="Build a review round.")
+    round_build_parser.add_argument(
+        "round_dir", metavar="ROUND_DIR", help="Path to the round directory."
+    )
+    round_build_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional non-negative seed for blind take order.",
+    )
     round_build_parser.set_defaults(func=_cmd_round_build)
     round_serve_parser = round_sub.add_parser("serve", help="Serve a review round.")
     round_serve_parser.set_defaults(func=_cmd_round_serve)

@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review Round</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f6f8;
+      --surface: #ffffff;
+      --surface-alt: #f0f2f5;
+      --border: #d5dbe3;
+      --active-border: #1d4ed8;
+      --active-tint: #f4f7ff;
+      --ink: #181b20;
+      --muted: #525866;
+      --playhead: #dc2626;
+      --selection-fill: rgba(29, 78, 216, 0.16);
+      --selection-edge: #1d4ed8;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .page {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 16px 20px 28px;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px 24px;
+      padding-bottom: 12px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #question {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--ink);
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .legend {
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .legend kbd {
+      display: inline-block;
+      padding: 1px 5px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--surface);
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    #loop-status {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #loop-status[data-active="true"] {
+      color: var(--active-border);
+      font-weight: 600;
+    }
+
+    #takes {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .take {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      padding: 12px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--border);
+      border-radius: 6px;
+    }
+
+    .take.active {
+      background: var(--active-tint);
+      border-color: var(--active-border);
+      border-left-width: 4px;
+    }
+
+    .take-media {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .take-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .take-title {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .take-index {
+      display: inline-block;
+      padding: 0 5px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--surface-alt);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      flex: 0 0 auto;
+    }
+
+    .take.active .take-index {
+      border-color: var(--active-border);
+      background: var(--active-border);
+      color: #ffffff;
+    }
+
+    .take-label {
+      font-weight: 600;
+      font-size: 14px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .take-gain {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+      flex: 0 0 auto;
+    }
+
+    .take video {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #101216;
+      border-radius: 4px;
+    }
+
+    .view {
+      position: relative;
+      width: 100%;
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .view-image {
+      display: block;
+      width: 100%;
+      height: auto;
+      pointer-events: none;
+    }
+
+    .selection {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: var(--selection-fill);
+      border-left: 1.5px solid var(--selection-edge);
+      border-right: 1.5px solid var(--selection-edge);
+      pointer-events: none;
+    }
+
+    .playhead {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: var(--playhead);
+      transform: translateX(-50%);
+      pointer-events: none;
+    }
+
+    #comment-box {
+      margin-top: 16px;
+      padding: 14px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      max-width: 760px;
+    }
+
+    #comment-box[hidden] {
+      display: none;
+    }
+
+    .comment-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+
+    .comment-target {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--ink);
+    }
+
+    .comment-fields {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .comment-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #comment-kind {
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 13px;
+    }
+
+    #comment-text {
+      width: 100%;
+      min-height: 76px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 13px;
+      resize: vertical;
+    }
+
+    .comment-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .comment-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    button {
+      padding: 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    #comment-status {
+      font-size: 12px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <h1 id="question">__QUESTION_TEXT__</h1>
+      <div class="controls">
+        <label class="toggle">
+          <input type="checkbox" id="level-match" checked>
+          <span>Level match</span>
+        </label>
+        <span id="loop-status" data-active="false">Loop: off</span>
+        <span class="legend">
+          <span><kbd>Space</kbd> play/pause</span>
+          <span><kbd>1</kbd>–<kbd>9</kbd> switch</span>
+          <span><kbd>L</kbd> loop</span>
+          <span><kbd>Esc</kbd> close</span>
+        </span>
+      </div>
+    </header>
+
+    <main id="takes"></main>
+
+    <section id="comment-box" hidden aria-label="Comment">
+      <div class="comment-meta">
+        <span id="comment-target" class="comment-target"></span>
+        <div class="comment-row">
+          <label for="comment-kind">Kind</label>
+          <select id="comment-kind">
+            <option value="flag">flag</option>
+            <option value="question">question</option>
+            <option value="request">request</option>
+            <option value="verdict">verdict</option>
+          </select>
+        </div>
+      </div>
+      <div class="comment-fields">
+        <textarea id="comment-text" placeholder="Note what happens here..."></textarea>
+        <div class="comment-actions">
+          <span id="comment-status" data-state="offline">Offline: comments cannot be saved.</span>
+          <div class="comment-buttons">
+            <button id="comment-cancel" type="button">Cancel</button>
+            <button id="comment-save" type="button" disabled>Save</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script id="page-data" type="application/json">__PAGE_DATA_JSON__</script>
+  <script src="page.js"></script>
+</body>
+</html>
