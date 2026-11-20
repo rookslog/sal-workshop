@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import signal
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -177,6 +178,13 @@ class RoundHTTPServer(ThreadingHTTPServer):
         self.build_dir = build_dir
         self.build_resolved = build_dir.resolve()
         super().__init__(server_address, _RoundRequestHandler)
+
+    def server_bind(self) -> None:
+        """Bind the socket and record host/port without a reverse-DNS lookup."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 class _RoundRequestHandler(BaseHTTPRequestHandler):

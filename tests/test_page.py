@@ -348,7 +348,9 @@ def test_g15_playhead_tracks_playback(page: OpenedPage) -> None:
             return [time, box.x + box.width / 2];
         }"""
     )
-    assert centre == pytest.approx(view_x(opened, 1, t), abs=4)
+    assert centre == pytest.approx(
+        view_x(opened, 1, t), abs=2 + 0.15 * (view_x(opened, 1, 1.0) - view_x(opened, 1, 0.0))
+    )
 
 
 def test_g16_offline_comment_fields(page: OpenedPage) -> None:
