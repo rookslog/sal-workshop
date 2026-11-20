@@ -13,11 +13,18 @@ several takes in step with their charts, and keeps time-stamped comments as plai
   `av_transition`) and writes `view.png` with `view.json`, which says where every time sits in the
   picture.
 - `sal round new` and `sal round build` — describe a set of takes to compare and build a review
-  page for them: synchronised playback, switching between takes, level matching, looping a stretch.
-
-- `sal round serve rounds/ID` — serves one round's page on this machine only (the loopback address)
-  so that comments written on the page are saved, one plain JSON file per comment, under
-  `records/comments/`.
+  page for them. A round keeps its own copy of each take (a clone where the file system allows,
+  so it costs no space) and is its folder: it can be moved or renamed whole, and exporting again
+  over the same file name does not change a round that exists.
+- The review page — takes play together and you switch between them without losing your place;
+  level matching; looping a stretch; the active take's picture large beside the charts; keys for
+  everything (`Space`, `1`–`9`, arrows, `L`, `C`, `Esc`). Sound-only takes work too. Chrome is the
+  browser it is developed against. In WebKit as Playwright ships it, takes can sit a few tenths of
+  a second apart for some seconds after a seek; Safari itself has not been tried.
+- `sal round serve rounds/ID` — serves one round's page on this machine only (the loopback address,
+  and only to its own page) so that comments written on the page are saved, one plain JSON file
+  per comment, under `records/comments/`. The page lists the comments in order of time, with the
+  answers to each underneath, and keeps the list current.
 - `sal comment add`, `sal comment answer`, `sal inbox` — file a comment from the command line, reply
   to one, and list the comments nobody has answered yet.
 
