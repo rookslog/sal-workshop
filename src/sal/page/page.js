@@ -2,6 +2,14 @@
   "use strict";
 
   const DRAG_THRESHOLD_PX = 4;
+  const SYNC_INTERVAL_MS = 100;
+  const SWITCH_SEEK_TOLERANCE_S = 0.08;
+  const SYNC_RATE_LOW_S = 0.02;
+  const SYNC_RATE_HIGH_S = 0.035;
+  const SYNC_VIDEO_SEEK_THRESHOLD_S = 0.15;
+  const SYNC_AUDIO_SEEK_THRESHOLD_S = 0.072;
+  const VIDEO_SEEK_SETTLE_MS = 650;
+  const AUDIO_SEEK_SETTLE_MS = 850;
 
   const pageDataEl = document.getElementById("page-data");
   if (!pageDataEl) {
@@ -19,6 +27,9 @@
   }
 
   const takesRoot = document.getElementById("takes");
+  const videoStageEl = document.getElementById("video-stage");
+  const playBtnEl = document.getElementById("play");
+  const timeEl = document.getElementById("time");
   const levelMatchEl = document.getElementById("level-match");
   const loopStatusEl = document.getElementById("loop-status");
   const commentBoxEl = document.getElementById("comment-box");
@@ -29,7 +40,19 @@
   const commentCancelEl = document.getElementById("comment-cancel");
   const commentStatusEl = document.getElementById("comment-status");
 
+  function isWebKitEngine() {
+    const ua = navigator.userAgent || "";
+    return (
+      ua.includes("AppleWebKit/") &&
+      !ua.includes("Chrome") &&
+      !ua.includes("Chromium") &&
+      !ua.includes("Edg") &&
+      !ua.includes("OPR")
+    );
+  }
+
   const isServed = window.location.protocol === "http:";
+  const needsSilentWebAudioStartup = isWebKitEngine();
 
   let activeIndex = 1;
   let selection = null; // { index, sha256, start, end }
@@ -37,11 +60,19 @@
   let isSaving = false;
   let loopActive = false;
   let rafId = null;
+  let syncTimerId = null;
+  let audioCtx = null;
 
   const rows = [];
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
+  }
+
+  function rowDuration(row) {
+    return Number.isFinite(row.video.duration) && row.video.duration > 0
+      ? row.video.duration
+      : row.take.duration;
   }
 
   function timeToX(t, ruler) {
@@ -66,7 +97,8 @@
   }
 
   function formatGain(gainDb) {
-    const normalized = gainDb === 0 ? 0 : gainDb;
+    const rounded = Math.round(gainDb * 10) / 10;
+    const normalized = Object.is(rounded, -0) || rounded === 0 ? 0 : rounded;
     return `${normalized.toFixed(1)} dB`;
   }
 
@@ -74,15 +106,99 @@
     return seconds.toFixed(3);
   }
 
-  function updateVolumes() {
+  function formatClock(seconds) {
+    const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+    const totalTenths = Math.round(safe * 10);
+    const tenth = totalTenths % 10;
+    const totalSecs = Math.floor(totalTenths / 10);
+    const secs = totalSecs % 60;
+    const mins = Math.floor(totalSecs / 60);
+    return `${mins}:${String(secs).padStart(2, "0")}.${tenth}`;
+  }
+
+  function activeRow() {
+    return rows[activeIndex - 1];
+  }
+
+  function updateStageVisibility() {
+    if (!videoStageEl) {
+      return;
+    }
+    const current = activeRow();
+    videoStageEl.hidden = !(current && current.hasPicture);
+  }
+
+  function refreshVideoPicture(row) {
+    const hasPic = row.video.videoWidth > 0;
+    row.hasPicture = hasPic;
+    row.video.classList.toggle("has-picture", hasPic);
+    row.video.classList.toggle("no-picture", !hasPic);
+    if (row.index === activeIndex) {
+      updateStageVisibility();
+    }
+  }
+
+  function updatePlayButton() {
+    if (!playBtnEl) {
+      return;
+    }
+    const current = activeRow();
+    const isPlaying = Boolean(current && !current.video.paused && !current.video.ended);
+    playBtnEl.setAttribute("data-state", isPlaying ? "playing" : "paused");
+    playBtnEl.textContent = isPlaying ? "Pause" : "Play";
+  }
+
+  function updateTimeReadout() {
+    if (!timeEl) {
+      return;
+    }
+    const current = activeRow();
+    if (!current) {
+      return;
+    }
+    const pos = clamp(current.video.currentTime || 0, 0, rowDuration(current));
+    const dur = rowDuration(current);
+    timeEl.textContent = `${formatClock(pos)} / ${formatClock(dur)}`;
+  }
+
+  function ensureAudioGain(row) {
+    if (!needsSilentWebAudioStartup) {
+      return null;
+    }
+    if (row.gainNode) {
+      return row.gainNode;
+    }
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) {
+      return null;
+    }
+    if (!audioCtx) {
+      audioCtx = new AudioCtx();
+    }
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume().catch(() => {});
+    }
+    try {
+      const source = audioCtx.createMediaElementSource(row.video);
+      const gain = audioCtx.createGain();
+      gain.gain.value = row.index === activeIndex && !row.startupUnmuted ? 1 : 0;
+      source.connect(gain);
+      gain.connect(audioCtx.destination);
+      row.gainNode = gain;
+      return gain;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function desiredLinearGain(row) {
     const matched = levelMatchEl ? levelMatchEl.checked : true;
+    return matched ? clamp(Math.pow(10, row.take.gain_db / 20), 0, 1) : 1.0;
+  }
+
+  function updateVolumes() {
     for (const row of rows) {
-      if (matched) {
-        const linear = Math.pow(10, row.take.gain_db / 20);
-        row.video.volume = clamp(linear, 0, 1);
-      } else {
-        row.video.volume = 1.0;
-      }
+      row.video.volume = desiredLinearGain(row);
     }
   }
 
@@ -90,8 +206,17 @@
     for (const row of rows) {
       const isActive = row.index === activeIndex;
       row.root.classList.toggle("active", isActive);
-      row.video.muted = !isActive;
+      if (isActive) {
+        row.startupUnmuted = false;
+        row.video.muted = false;
+      } else if (!row.startupUnmuted) {
+        row.video.muted = true;
+      }
+      if (row.gainNode) {
+        row.gainNode.gain.value = isActive ? 1 : 0;
+      }
     }
+    updateStageVisibility();
   }
 
   function updatePlayheadForRow(row) {
@@ -235,6 +360,7 @@
       setOfflineStatus();
     }
     commentBoxEl.hidden = false;
+    commentBoxEl.scrollIntoView({ block: "nearest" });
   }
 
   async function saveComment() {
@@ -288,21 +414,6 @@
     }
   }
 
-  function seekAll(timeSeconds) {
-    for (const row of rows) {
-      const duration = Number.isFinite(row.video.duration)
-        ? row.video.duration
-        : row.take.duration;
-      const clamped = clamp(timeSeconds, 0, duration);
-      row.video.currentTime = clamped;
-    }
-    updateAllPlayheads();
-  }
-
-  function activeRow() {
-    return rows[activeIndex - 1];
-  }
-
   function playVideoSafe(video) {
     try {
       const maybePromise = video.play();
@@ -311,6 +422,148 @@
       }
     } catch (_err) {
       // Ignore synchronous playback errors in headless environments.
+    }
+  }
+
+  function seekAll(timeSeconds) {
+    const current = activeRow();
+    const wasPlaying = Boolean(current && !current.video.paused && !current.video.ended);
+    for (const row of rows) {
+      const duration = rowDuration(row);
+      const clamped = clamp(timeSeconds, 0, duration);
+      row.video.playbackRate = 1;
+      row.awaitingSeekCalibration = false;
+      row.video.currentTime = clamped;
+    }
+    if (wasPlaying) {
+      for (const row of rows) {
+        if (row.video.paused) {
+          playVideoSafe(row.video);
+        }
+      }
+    }
+    updateAllPlayheads();
+    updateTimeReadout();
+    updatePlayButton();
+  }
+
+  function playRowForSync(row) {
+    // WebKit truncates muted audio-only .mp3/.opus <video> elements at t=0 unless
+    // started unmuted; route through a zero-gain WebAudio node for silent startup.
+    if (
+      needsSilentWebAudioStartup &&
+      !row.hasPicture &&
+      row.index !== activeIndex &&
+      row.video.currentTime < 0.01
+    ) {
+      const gain = ensureAudioGain(row);
+      if (gain) {
+        gain.gain.value = 0;
+        row.startupUnmuted = true;
+        row.video.muted = false;
+      }
+    }
+    playVideoSafe(row.video);
+  }
+
+  function syncSeekRow(row, masterTime, duration) {
+    const now = performance.now();
+    const lead = row.hasPicture ? 0 : row.seekLead;
+    const target = clamp(masterTime + lead, 0, duration);
+    row.lastSeekAt = now;
+    row.awaitingSeekCalibration = !row.hasPicture;
+    row.video.playbackRate = 1;
+    row.video.currentTime = target;
+  }
+
+  function syncMutedTakes() {
+    const master = activeRow();
+    if (!master || master.video.paused || master.video.ended) {
+      return;
+    }
+    if (master.video.playbackRate !== 1) {
+      master.video.playbackRate = 1;
+    }
+    const now = performance.now();
+    const masterTime = master.video.currentTime;
+    for (const row of rows) {
+      if (row === master) {
+        continue;
+      }
+      if (row.startupUnmuted && !row.video.paused && row.video.currentTime > 0.01) {
+        row.startupUnmuted = false;
+        row.video.muted = true;
+      }
+      const duration = rowDuration(row);
+      if (masterTime >= duration - 0.05) {
+        continue;
+      }
+      const settleMs = row.hasPicture ? VIDEO_SEEK_SETTLE_MS : AUDIO_SEEK_SETTLE_MS;
+      if (row.video.seeking || now - row.lastSeekAt < settleMs) {
+        continue;
+      }
+      if (row.awaitingSeekCalibration) {
+        row.awaitingSeekCalibration = false;
+        if (!row.video.paused) {
+          const residual = masterTime - row.video.currentTime;
+          const factor = residual > 0 ? 0.95 : 0.5;
+          row.seekLead = clamp(row.seekLead + residual * factor, 0, 0.45);
+        }
+      }
+      const diff = masterTime - row.video.currentTime;
+      const absDiff = Math.abs(diff);
+
+      if (row.video.paused) {
+        if (absDiff > 0.05) {
+          syncSeekRow(row, masterTime, duration);
+        } else if (row.video.playbackRate !== 1) {
+          row.video.playbackRate = 1;
+        }
+        playRowForSync(row);
+        continue;
+      }
+
+      if (!row.hasPicture) {
+        // WebKit truncates duration on muted .mp3/.opus <video> if playbackRate != 1;
+        // sync audio-only takes by seek with measured seek-latency lead.
+        if (row.video.playbackRate !== 1) {
+          row.video.playbackRate = 1;
+        }
+        if (absDiff > SYNC_AUDIO_SEEK_THRESHOLD_S) {
+          syncSeekRow(row, masterTime, duration);
+        }
+        continue;
+      }
+
+      if (absDiff > SYNC_VIDEO_SEEK_THRESHOLD_S) {
+        syncSeekRow(row, masterTime, duration);
+      } else if (absDiff > SYNC_RATE_HIGH_S) {
+        const step = absDiff > 0.09 ? 0.08 : 0.05;
+        const targetRate = diff > 0 ? 1 + step : 1 - step;
+        if (row.video.playbackRate !== targetRate) {
+          row.video.playbackRate = targetRate;
+        }
+      } else if (absDiff <= SYNC_RATE_LOW_S && row.video.playbackRate !== 1) {
+        row.video.playbackRate = 1;
+      }
+    }
+  }
+
+  function startSyncTimer() {
+    if (syncTimerId !== null) {
+      return;
+    }
+    syncTimerId = window.setInterval(() => {
+      syncMutedTakes();
+      updateTimeReadout();
+      updatePlayButton();
+    }, SYNC_INTERVAL_MS);
+  }
+
+  function stopSyncTimer() {
+    if (syncTimerId !== null) {
+      window.clearInterval(syncTimerId);
+      syncTimerId = null;
     }
   }
 
@@ -334,11 +587,13 @@
         seekAll(selection.start);
         for (const row of rows) {
           if (row.video.paused) {
-            playVideoSafe(row.video);
+            playRowForSync(row);
           }
         }
       }
       updateAllPlayheads();
+      updateTimeReadout();
+      updatePlayButton();
       if (!current.video.paused && !current.video.ended) {
         rafId = window.requestAnimationFrame(tick);
       }
@@ -355,17 +610,31 @@
 
   function pauseAll() {
     stopRaf();
-    const masterTime = activeRow().video.currentTime;
+    stopSyncTimer();
+    const current = activeRow();
+    const masterTime = current.video.currentTime;
     for (const row of rows) {
       row.video.pause();
-      if (Math.abs(row.video.currentTime - masterTime) > 0.05) {
-        row.video.currentTime = masterTime;
+      row.video.playbackRate = 1;
+      row.startupUnmuted = false;
+      row.awaitingSeekCalibration = false;
+      row.video.muted = row !== current;
+      if (row.gainNode) {
+        row.gainNode.gain.value = row === current ? 1 : 0;
+      }
+      if (row !== current && Math.abs(row.video.currentTime - masterTime) > 0.02) {
+        row.video.currentTime = clamp(masterTime, 0, rowDuration(row));
       }
     }
     updateAllPlayheads();
+    updateTimeReadout();
+    updatePlayButton();
   }
 
   function playAll() {
+    if (audioCtx && audioCtx.state === "suspended") {
+      audioCtx.resume().catch(() => {});
+    }
     const current = activeRow();
     if (loopActive && selection && selection.end > selection.start) {
       if (
@@ -377,15 +646,37 @@
     } else if (!current.video.ended) {
       const masterTime = current.video.currentTime;
       for (const row of rows) {
-        if (row !== current && Math.abs(row.video.currentTime - masterTime) > 0.05) {
-          row.video.currentTime = masterTime;
+        if (row !== current && Math.abs(row.video.currentTime - masterTime) > 0.02) {
+          row.video.currentTime = clamp(masterTime, 0, rowDuration(row));
         }
       }
     }
     for (const row of rows) {
-      playVideoSafe(row.video);
+      row.video.playbackRate = 1;
+      if (
+        needsSilentWebAudioStartup &&
+        !row.hasPicture &&
+        row !== current &&
+        row.video.currentTime < 0.01
+      ) {
+        const gain = ensureAudioGain(row);
+        if (gain) {
+          gain.gain.value = 0;
+          row.startupUnmuted = true;
+          row.video.muted = false;
+        }
+      }
     }
+    for (const row of rows) {
+      if (row !== current) {
+        playVideoSafe(row.video);
+      }
+    }
+    playVideoSafe(current.video);
     startRaf();
+    startSyncTimer();
+    updateTimeReadout();
+    updatePlayButton();
   }
 
   function togglePlayPause() {
@@ -402,28 +693,46 @@
       return;
     }
     const prev = activeRow();
+    const next = rows[nextIndex - 1];
     const masterTime = prev.video.currentTime;
     const wasPlaying = !prev.video.paused && !prev.video.ended;
+
+    // Move the target take while it is still muted when it differs by more than 0.08 s.
+    if (Math.abs(next.video.currentTime - masterTime) > SWITCH_SEEK_TOLERANCE_S) {
+      next.video.currentTime = clamp(masterTime, 0, rowDuration(next));
+    }
+    next.video.playbackRate = 1;
 
     activeIndex = nextIndex;
     updateMuteAndActive();
 
-    const next = activeRow();
-    if (Math.abs(next.video.currentTime - masterTime) > 0.03) {
-      next.video.currentTime = masterTime;
-    }
-    for (const row of rows) {
-      if (row !== next && Math.abs(row.video.currentTime - masterTime) > 0.05) {
-        row.video.currentTime = masterTime;
-      }
-    }
     if (wasPlaying) {
       if (next.video.paused) {
         playVideoSafe(next.video);
       }
+      for (const row of rows) {
+        if (row !== next) {
+          if (Math.abs(row.video.currentTime - next.video.currentTime) > SYNC_VIDEO_SEEK_THRESHOLD_S) {
+            syncSeekRow(row, next.video.currentTime, rowDuration(row));
+          }
+          if (row.video.paused) {
+            playRowForSync(row);
+          }
+        }
+      }
       startRaf();
+      startSyncTimer();
+    } else {
+      for (const row of rows) {
+        row.video.playbackRate = 1;
+        if (row !== next && Math.abs(row.video.currentTime - next.video.currentTime) > 0.02) {
+          row.video.currentTime = clamp(next.video.currentTime, 0, rowDuration(row));
+        }
+      }
     }
     updateAllPlayheads();
+    updateTimeReadout();
+    updatePlayButton();
   }
 
   function toggleLoop() {
@@ -540,9 +849,6 @@
     rowEl.setAttribute("data-index", String(index));
     rowEl.setAttribute("data-sha256", take.sha256);
 
-    const mediaCol = document.createElement("div");
-    mediaCol.className = "take-media";
-
     const headerEl = document.createElement("div");
     headerEl.className = "take-header";
 
@@ -559,19 +865,22 @@
 
     titleEl.append(indexEl, labelEl);
 
-    const gainEl = document.createElement("span");
-    gainEl.className = "take-gain";
-    gainEl.textContent = formatGain(take.gain_db);
-
-    headerEl.append(titleEl, gainEl);
+    const asideEl = document.createElement("div");
+    asideEl.className = "take-aside";
 
     const videoEl = document.createElement("video");
+    videoEl.className = "no-picture";
     videoEl.src = take.media;
     videoEl.preload = "auto";
     videoEl.playsInline = true;
     videoEl.muted = index !== 1;
 
-    mediaCol.append(headerEl, videoEl);
+    const gainEl = document.createElement("span");
+    gainEl.className = "take-gain";
+    gainEl.textContent = formatGain(take.gain_db);
+
+    asideEl.append(videoEl, gainEl);
+    headerEl.append(titleEl, asideEl);
 
     const viewEl = document.createElement("div");
     viewEl.className = "view";
@@ -593,7 +902,7 @@
     playheadEl.className = "playhead";
 
     viewEl.append(imgEl, marksEl, selectionEl, playheadEl);
-    rowEl.append(mediaCol, viewEl);
+    rowEl.append(headerEl, viewEl);
     takesRoot.append(rowEl);
 
     const row = {
@@ -606,11 +915,43 @@
       marks: marksEl,
       selection: selectionEl,
       playhead: playheadEl,
+      hasPicture: false,
+      gainNode: null,
+      startupUnmuted: false,
+      seekLead: 0,
+      lastSeekAt: 0,
+      awaitingSeekCalibration: false,
     };
     rows.push(row);
 
+    labelEl.addEventListener("click", () => {
+      switchTake(row.index);
+    });
+    videoEl.addEventListener("click", () => {
+      if (row.index === activeIndex) {
+        togglePlayPause();
+      }
+    });
+
     imgEl.addEventListener("load", () => updatePlayheadForRow(row));
-    videoEl.addEventListener("loadedmetadata", () => updatePlayheadForRow(row));
+    videoEl.addEventListener("loadedmetadata", () => {
+      refreshVideoPicture(row);
+      updatePlayheadForRow(row);
+      if (row.index === activeIndex) {
+        updateTimeReadout();
+      }
+    });
+    videoEl.addEventListener("resize", () => refreshVideoPicture(row));
+    videoEl.addEventListener("play", () => {
+      if (row.index === activeIndex) {
+        updatePlayButton();
+      }
+    });
+    videoEl.addEventListener("pause", () => {
+      if (row.index === activeIndex) {
+        updatePlayButton();
+      }
+    });
     videoEl.addEventListener("timeupdate", () => {
       if (row.index === activeIndex && loopActive && selection && selection.end > selection.start) {
         if (videoEl.currentTime >= selection.end) {
@@ -619,6 +960,9 @@
         }
       }
       updatePlayheadForRow(row);
+      if (row.index === activeIndex) {
+        updateTimeReadout();
+      }
     });
     videoEl.addEventListener("ended", () => {
       if (row.index !== activeIndex) {
@@ -630,20 +974,37 @@
           playVideoSafe(r.video);
         }
         startRaf();
+        startSyncTimer();
       } else {
         stopRaf();
+        stopSyncTimer();
         for (const r of rows) {
+          r.video.playbackRate = 1;
           if (r !== row && !r.video.paused) {
             r.video.pause();
           }
         }
         updateAllPlayheads();
+        updateTimeReadout();
+        updatePlayButton();
       }
     });
+
+    if (videoEl.readyState >= 1) {
+      refreshVideoPicture(row);
+    }
 
     wireViewPointer(row);
   });
 
+  if (playBtnEl) {
+    playBtnEl.addEventListener("click", (event) => {
+      if (event.detail > 0) {
+        playBtnEl.blur();
+      }
+      togglePlayPause();
+    });
+  }
   if (levelMatchEl) {
     levelMatchEl.addEventListener("change", updateVolumes);
   }
@@ -664,20 +1025,28 @@
       return;
     }
 
-    if (event.metaKey || event.ctrlKey || event.altKey) {
-      return;
-    }
-
     const activeEl = document.activeElement;
-    if (
+    const inCommentField =
       activeEl instanceof HTMLElement &&
       (activeEl === commentTextEl ||
         activeEl === commentKindEl ||
         activeEl.tagName === "TEXTAREA" ||
         activeEl.tagName === "SELECT" ||
         (activeEl.tagName === "INPUT" && activeEl.getAttribute("type") !== "checkbox") ||
-        activeEl.isContentEditable)
+        activeEl.isContentEditable);
+
+    if (
+      event.key === "Enter" &&
+      (event.ctrlKey || event.metaKey) &&
+      !event.altKey &&
+      activeEl === commentTextEl
     ) {
+      event.preventDefault();
+      void saveComment();
+      return;
+    }
+
+    if (event.metaKey || event.ctrlKey || event.altKey || inCommentField) {
       return;
     }
 
@@ -692,6 +1061,26 @@
       if (idx >= 1 && idx <= rows.length) {
         event.preventDefault();
         switchTake(idx);
+      }
+      return;
+    }
+
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const current = activeRow();
+      const step = event.shiftKey ? 5 : 1;
+      const delta = event.key === "ArrowRight" ? step : -step;
+      seekAll(clamp(current.video.currentTime + delta, 0, rowDuration(current)));
+      return;
+    }
+
+    if (event.key === "c" || event.key === "C") {
+      event.preventDefault();
+      const current = activeRow();
+      const t = clamp(current.video.currentTime || 0, 0, rowDuration(current));
+      openCommentBox(current, t, t);
+      if (commentTextEl) {
+        commentTextEl.focus();
       }
       return;
     }
@@ -714,4 +1103,6 @@
   updateVolumes();
   updateLoopStatus();
   updateAllPlayheads();
+  updateTimeReadout();
+  updatePlayButton();
 })();

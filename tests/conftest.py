@@ -633,3 +633,162 @@ def _served_page_helper():
 
 
 open_served_page = _served_page_helper()
+
+
+def _make_long_take(path: Path, picture: str, frequency: int, volume: str) -> Path:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            picture,
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={frequency}:sample_rate=48000:duration=30",
+            "-af",
+            f"volume={volume}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "24",
+            "-sc_threshold",
+            "0",
+            "-c:a",
+            "aac",
+            str(path),
+        ],
+        check=True,
+        timeout=120,
+    )
+    return path
+
+
+def _long_page_helpers():
+    import re
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from typing import TYPE_CHECKING
+
+    import pytest
+
+    if TYPE_CHECKING:
+        from playwright.sync_api import Page
+
+    @pytest.fixture(scope="session")
+    def long_round(tmp_path_factory: pytest.TempPathFactory) -> Path:
+        root = tmp_path_factory.mktemp("long-round")
+        first = _make_long_take(
+            root / "first.mp4", "testsrc2=size=640x360:rate=24:duration=30", 440, "1"
+        )
+        second = _make_long_take(
+            root / "second.mp4", "color=color=blue:size=640x360:rate=24:duration=30", 660, "1/3"
+        )
+        return make_round(root, (first, second), view="audio_basic")
+
+    @contextmanager
+    def sized_page(
+        browser_name: str, round_dir: Path, width: int = 1440, height: int = 900
+    ) -> Iterator["Page"]:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            options = {"args": ["--mute-audio"]} if browser_name == "chromium" else {}
+            browser = getattr(playwright, browser_name).launch(headless=True, **options)
+            try:
+                context = browser.new_context(
+                    viewport={"width": width, "height": height}, service_workers="block"
+                )
+                context.route(re.compile(r"^(?!file://)"), lambda route: route.abort())
+                context.route_web_socket("**/*", lambda socket: socket.close())
+                page = context.new_page()
+                page.goto((round_dir / "build" / "index.html").as_uri())
+                page.wait_for_function(
+                    """() => {
+                        const videos = Array.from(document.querySelectorAll('video'));
+                        return videos.length > 0 && videos.every(video => video.readyState >= 2);
+                    }""",
+                    timeout=10_000,
+                )
+                yield page
+            finally:
+                browser.close()
+
+    @pytest.fixture
+    def long_page(browser_name: str, long_round: Path) -> Iterator["Page"]:
+        with sized_page(browser_name, long_round) as page:
+            yield page
+
+    def sample(page: "Page", every_ms: int, count: int) -> list[list[list[float | bool]]]:
+        return page.evaluate(
+            """async ({everyMs, count}) => {
+                const samples = [];
+                for (let index = 0; index < count; index++) {
+                    if (index > 0) {
+                        await new Promise(resolve => setTimeout(resolve, everyMs));
+                    }
+                    samples.push(Array.from(document.querySelectorAll('video'), video => [
+                        video.currentTime, video.playbackRate, video.paused, video.muted
+                    ]));
+                }
+                return samples;
+            }""",
+            {"everyMs": every_ms, "count": count},
+        )
+
+    return long_round, sized_page, long_page, sample
+
+
+long_round, sized_page, long_page, sample = _long_page_helpers()
+
+
+def make_audio_take(path: Path, pitch: int, codec: str) -> Path:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={pitch}:sample_rate=48000:duration=12",
+            "-ac",
+            "2",
+            "-c:a",
+            codec,
+            str(path),
+        ],
+        check=True,
+        timeout=120,
+    )
+    return path
+
+
+def _audio_round_fixture():
+    import pytest
+
+    @pytest.fixture(scope="module")
+    def audio_round(tmp_path_factory: pytest.TempPathFactory) -> Path:
+        root = tmp_path_factory.mktemp("audio-round")
+        takes = [
+            make_audio_take(root / f"take{extension}", pitch, codec)
+            for extension, pitch, codec in (
+                (".m4a", 330, "aac"),
+                (".mp3", 440, "libmp3lame"),
+                (".wav", 550, "pcm_s16le"),
+                (".opus", 660, "libopus"),
+            )
+        ]
+        return make_round(root, takes, view="audio_basic", labels=("one", "two", "three", "four"))
+
+    return audio_round
+
+
+audio_round = _audio_round_fixture()

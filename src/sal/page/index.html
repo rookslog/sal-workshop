@@ -38,32 +38,79 @@
     .page {
       max-width: 1680px;
       margin: 0 auto;
-      padding: 16px 20px 28px;
+      padding: 14px 16px 28px;
+    }
+
+    .rail {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .video-stage {
+      display: none;
+    }
+
+    .rail-body {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
     }
 
     .topbar {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 12px 24px;
-      padding-bottom: 12px;
-      margin-bottom: 14px;
+      padding-bottom: 8px;
       border-bottom: 1px solid var(--border);
     }
 
     #question {
       margin: 0;
-      font-size: 18px;
+      font-size: 16px;
       font-weight: 600;
       letter-spacing: -0.01em;
+    }
+
+    .transport-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+
+    .transport-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    #play {
+      min-width: 72px;
+      font-weight: 600;
+    }
+
+    #play[data-state="playing"] {
+      border-color: var(--active-border);
+      background: var(--active-tint);
+      color: var(--active-border);
+    }
+
+    #time {
+      font-family: var(--mono);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink);
     }
 
     .controls {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 16px;
+      justify-content: space-between;
+      gap: 8px 16px;
       font-size: 13px;
       color: var(--muted);
     }
@@ -78,10 +125,12 @@
     }
 
     .legend {
-      display: inline-flex;
+      display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 10px;
+      gap: 6px 10px;
+      font-size: 12px;
+      color: var(--muted);
     }
 
     .legend kbd {
@@ -110,18 +159,19 @@
       display: flex;
       flex-direction: column;
       gap: 12px;
+      min-width: 0;
     }
 
     .take {
-      display: grid;
-      grid-template-columns: 260px minmax(0, 1fr);
-      gap: 14px;
-      align-items: center;
-      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
       background: var(--surface);
       border: 1px solid var(--border);
       border-left: 4px solid var(--border);
       border-radius: 6px;
+      min-width: 0;
     }
 
     .take.active {
@@ -130,16 +180,10 @@
       border-left-width: 4px;
     }
 
-    .take-media {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      min-width: 0;
-    }
-
     .take-header {
       display: flex;
-      align-items: baseline;
+      flex-wrap: wrap;
+      align-items: center;
       justify-content: space-between;
       gap: 8px;
     }
@@ -175,6 +219,14 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .take-aside {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
     }
 
     .take-gain {
@@ -186,10 +238,30 @@
 
     .take video {
       display: block;
-      width: 100%;
-      aspect-ratio: 16 / 9;
       background: #101216;
       border-radius: 4px;
+      object-fit: contain;
+    }
+
+    .take video.no-picture {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0.01;
+      pointer-events: none;
+    }
+
+    .take:not(.active) video.has-picture {
+      width: 64px;
+      height: 36px;
+      flex: 0 0 auto;
+    }
+
+    .take.active video.has-picture {
+      width: 360px;
+      max-width: 100%;
+      aspect-ratio: 16 / 9;
+      cursor: pointer;
     }
 
     .view {
@@ -250,12 +322,11 @@
     }
 
     #comment-box {
-      margin-top: 16px;
-      padding: 14px 16px;
+      padding: 12px 14px;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 6px;
-      max-width: 760px;
+      width: 100%;
     }
 
     #comment-box[hidden] {
@@ -267,8 +338,8 @@
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 10px;
+      gap: 8px;
+      margin-bottom: 8px;
       font-size: 13px;
     }
 
@@ -281,14 +352,14 @@
     .comment-fields {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
     }
 
     .comment-row {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
     }
 
     #comment-kind {
@@ -303,7 +374,7 @@
 
     #comment-text {
       width: 100%;
-      min-height: 76px;
+      min-height: 72px;
       padding: 8px 10px;
       border: 1px solid var(--border);
       border-radius: 4px;
@@ -319,7 +390,7 @@
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 8px;
     }
 
     .comment-buttons {
@@ -347,53 +418,113 @@
       font-size: 12px;
       color: var(--muted);
     }
+
+    @media (min-width: 1120px) {
+      .rail {
+        position: fixed;
+        top: 14px;
+        left: 16px;
+        bottom: 14px;
+        width: 512px;
+        margin-bottom: 0;
+        z-index: 20;
+      }
+
+      .video-stage {
+        display: block;
+        width: 512px;
+        height: 288px;
+        flex: 0 0 auto;
+        border-radius: 6px;
+        background: #101216;
+      }
+
+      .video-stage[hidden] {
+        display: none;
+      }
+
+      .rail-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+      }
+
+      #takes {
+        margin-left: 530px;
+      }
+
+      .take.active video.has-picture {
+        position: fixed;
+        top: 14px;
+        left: 16px;
+        width: 512px;
+        height: 288px;
+        border-radius: 6px;
+        z-index: 30;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="page">
-    <header class="topbar">
-      <h1 id="question">__QUESTION_TEXT__</h1>
-      <div class="controls">
-        <label class="toggle">
-          <input type="checkbox" id="level-match" checked>
-          <span>Level match</span>
-        </label>
-        <span id="loop-status" data-active="false">Loop: off</span>
-        <span class="legend">
+    <aside class="rail">
+      <div id="video-stage" class="video-stage" hidden></div>
+      <div class="rail-body">
+        <header class="topbar">
+          <h1 id="question">__QUESTION_TEXT__</h1>
+        </header>
+
+        <section class="transport-bar" aria-label="Transport">
+          <div class="transport-row">
+            <button id="play" type="button" data-state="paused">Play</button>
+            <span id="time">0:00.0 / 0:00.0</span>
+          </div>
+          <div class="controls">
+            <label class="toggle">
+              <input type="checkbox" id="level-match" checked>
+              <span>Level match</span>
+            </label>
+            <span id="loop-status" data-active="false">Loop: off</span>
+          </div>
+        </section>
+
+        <section id="comment-box" hidden aria-label="Comment">
+          <div class="comment-meta">
+            <span id="comment-target" class="comment-target"></span>
+            <div class="comment-row">
+              <label for="comment-kind">Kind</label>
+              <select id="comment-kind">
+                <option value="flag">flag</option>
+                <option value="question">question</option>
+                <option value="request">request</option>
+                <option value="verdict">verdict</option>
+              </select>
+            </div>
+          </div>
+          <div class="comment-fields">
+            <textarea id="comment-text" placeholder="Note what happens here..."></textarea>
+            <div class="comment-actions">
+              <span id="comment-status" data-state="offline">Offline: comments cannot be saved.</span>
+              <div class="comment-buttons">
+                <button id="comment-cancel" type="button">Cancel</button>
+                <button id="comment-save" type="button" disabled>Save</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="legend">
           <span><kbd>Space</kbd> play/pause</span>
           <span><kbd>1</kbd>–<kbd>9</kbd> switch</span>
+          <span><kbd>←</kbd>/<kbd>→</kbd> seek</span>
           <span><kbd>L</kbd> loop</span>
+          <span><kbd>C</kbd> comment</span>
           <span><kbd>Esc</kbd> close</span>
-        </span>
+        </div>
       </div>
-    </header>
+    </aside>
 
     <main id="takes"></main>
-
-    <section id="comment-box" hidden aria-label="Comment">
-      <div class="comment-meta">
-        <span id="comment-target" class="comment-target"></span>
-        <div class="comment-row">
-          <label for="comment-kind">Kind</label>
-          <select id="comment-kind">
-            <option value="flag">flag</option>
-            <option value="question">question</option>
-            <option value="request">request</option>
-            <option value="verdict">verdict</option>
-          </select>
-        </div>
-      </div>
-      <div class="comment-fields">
-        <textarea id="comment-text" placeholder="Note what happens here..."></textarea>
-        <div class="comment-actions">
-          <span id="comment-status" data-state="offline">Offline: comments cannot be saved.</span>
-          <div class="comment-buttons">
-            <button id="comment-cancel" type="button">Cancel</button>
-            <button id="comment-save" type="button" disabled>Save</button>
-          </div>
-        </div>
-      </div>
-    </section>
   </div>
 
   <script id="page-data" type="application/json">__PAGE_DATA_JSON__</script>

@@ -30,12 +30,19 @@ CONTENT_TYPES: dict[str, str] = {
     ".json": "application/json; charset=utf-8",
     ".png": "image/png",
     ".mp4": "video/mp4",
-    ".wav": "audio/wav",
+    ".m4v": "video/mp4",
     ".mov": "video/quicktime",
     ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
     ".m4a": "audio/mp4",
-    ".aac": "audio/aac",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
     ".flac": "audio/flac",
+    ".opus": "audio/ogg",
+    ".ogg": "audio/ogg",
+    ".aac": "audio/aac",
+    ".aif": "audio/aiff",
+    ".aiff": "audio/aiff",
 }
 STREAM_CHUNK_SIZE = 65_536
 
@@ -241,7 +248,36 @@ class _RoundRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _has_valid_host(self) -> bool:
+        hosts = self.headers.get_all("Host")
+        if not hosts or len(hosts) != 1:
+            return False
+        port = self.server.server_address[1]
+        return hosts[0].strip().lower() in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _has_valid_origin(self) -> bool:
+        origins = self.headers.get_all("Origin")
+        if not origins:
+            return True
+        if len(origins) != 1:
+            return False
+        port = self.server.server_address[1]
+        return origins[0].strip().lower() in {
+            f"http://127.0.0.1:{port}",
+            f"http://localhost:{port}",
+        }
+
+    def _has_json_content_type(self) -> bool:
+        content_types = self.headers.get_all("Content-Type")
+        if not content_types or len(content_types) != 1:
+            return False
+        media_type = content_types[0].split(";", 1)[0].strip().lower()
+        return media_type == "application/json"
+
     def _handle_get_or_head(self, *, include_body: bool) -> None:
+        if not self._has_valid_host():
+            self._send_empty(403)
+            return
         route_path = urlsplit(self.path).path
         if route_path == "/comments":
             records = [
@@ -274,9 +310,18 @@ class _RoundRequestHandler(BaseHTTPRequestHandler):
         self._handle_get_or_head(include_body=False)
 
     def do_POST(self) -> None:
+        if not self._has_valid_host():
+            self._send_empty(403)
+            return
         route_path = urlsplit(self.path).path
         if route_path != "/comments":
             self._send_empty(404)
+            return
+        if not self._has_valid_origin():
+            self._send_empty(403)
+            return
+        if not self._has_json_content_type():
+            self._send_empty(415)
             return
 
         raw_length = self.headers.get("Content-Length")

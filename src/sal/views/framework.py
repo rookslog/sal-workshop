@@ -172,7 +172,11 @@ def _draw_png(
     panel_results: list[PanelResult],
     boxes: list[tuple[int, int, int, int]],
 ) -> bytes:
+    import logging
+
     _ensure_mpl_config_dir()
+    # Silence matplotlib's first-run font-cache build warning on stderr.
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
     import matplotlib
 
     matplotlib.use("Agg")
