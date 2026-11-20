@@ -10,6 +10,8 @@
   const SYNC_AUDIO_SEEK_THRESHOLD_S = 0.072;
   const VIDEO_SEEK_SETTLE_MS = 650;
   const AUDIO_SEEK_SETTLE_MS = 850;
+  const COMMENT_POLL_MS = 5000;
+  const END_REST_TOLERANCE_S = 0.05;
 
   const pageDataEl = document.getElementById("page-data");
   if (!pageDataEl) {
@@ -39,6 +41,7 @@
   const commentSaveEl = document.getElementById("comment-save");
   const commentCancelEl = document.getElementById("comment-cancel");
   const commentStatusEl = document.getElementById("comment-status");
+  const commentsListEl = document.getElementById("comments");
 
   function isWebKitEngine() {
     const ua = navigator.userAgent || "";
@@ -58,6 +61,7 @@
   let selection = null; // { index, sha256, start, end }
   let commentTarget = null; // { sha256, start, end }
   let isSaving = false;
+  let inFlightCommentsRead = null;
   let loopActive = false;
   let rafId = null;
   let syncTimerId = null;
@@ -181,7 +185,9 @@
     try {
       const source = audioCtx.createMediaElementSource(row.video);
       const gain = audioCtx.createGain();
-      gain.gain.value = row.index === activeIndex && !row.startupUnmuted ? 1 : 0;
+      row.video.volume = 1.0;
+      gain.gain.value =
+        row.index === activeIndex && !row.startupUnmuted ? desiredLinearGain(row) : 0;
       source.connect(gain);
       gain.connect(audioCtx.destination);
       row.gainNode = gain;
@@ -198,7 +204,13 @@
 
   function updateVolumes() {
     for (const row of rows) {
-      row.video.volume = desiredLinearGain(row);
+      if (row.gainNode) {
+        row.video.volume = 1.0;
+        row.gainNode.gain.value =
+          row.index === activeIndex && !row.startupUnmuted ? desiredLinearGain(row) : 0;
+      } else {
+        row.video.volume = desiredLinearGain(row);
+      }
     }
   }
 
@@ -213,7 +225,8 @@
         row.video.muted = true;
       }
       if (row.gainNode) {
-        row.gainNode.gain.value = isActive ? 1 : 0;
+        row.video.volume = 1.0;
+        row.gainNode.gain.value = isActive ? desiredLinearGain(row) : 0;
       }
     }
     updateStageVisibility();
@@ -280,8 +293,9 @@
     if (!Array.isArray(records)) {
       return;
     }
+    const perRow = new Map();
     for (const row of rows) {
-      row.marks.textContent = "";
+      perRow.set(row, []);
     }
     for (const record of records) {
       if (!record || typeof record !== "object") {
@@ -302,35 +316,329 @@
       if (!Number.isFinite(start) || !Number.isFinite(end)) {
         continue;
       }
+      perRow.get(row).push({ id: String(record.id), start, end });
+    }
+    for (const [row, entries] of perRow.entries()) {
+      const sig = JSON.stringify(entries);
+      if (row.marksSig === sig) {
+        continue;
+      }
+      row.marksSig = sig;
+      row.marks.textContent = "";
       const view = row.take.view;
       const ruler = view.ruler;
-      const xStartPx = timeToX(clamp(start, ruler.t0, ruler.t1), ruler);
-      const xEndPx = timeToX(clamp(end, ruler.t0, ruler.t1), ruler);
-      const markEl = document.createElement("div");
-      markEl.setAttribute("data-id", String(record.id));
-      if (end <= start || Math.abs(xEndPx - xStartPx) < 1) {
-        markEl.className = "comment-mark comment-mark-moment";
-        markEl.style.left = `${(xStartPx / view.width) * 100}%`;
-      } else {
-        markEl.className = "comment-mark";
-        markEl.style.left = `${(xStartPx / view.width) * 100}%`;
-        markEl.style.width = `${((xEndPx - xStartPx) / view.width) * 100}%`;
+      for (const entry of entries) {
+        const xStartPx = timeToX(clamp(entry.start, ruler.t0, ruler.t1), ruler);
+        const xEndPx = timeToX(clamp(entry.end, ruler.t0, ruler.t1), ruler);
+        const markEl = document.createElement("div");
+        markEl.setAttribute("data-id", entry.id);
+        if (entry.end <= entry.start || Math.abs(xEndPx - xStartPx) < 1) {
+          markEl.className = "comment-mark comment-mark-moment";
+          markEl.style.left = `${(xStartPx / view.width) * 100}%`;
+        } else {
+          markEl.className = "comment-mark";
+          markEl.style.left = `${(xStartPx / view.width) * 100}%`;
+          markEl.style.width = `${((xEndPx - xStartPx) / view.width) * 100}%`;
+        }
+        row.marks.append(markEl);
       }
-      row.marks.append(markEl);
     }
   }
 
-  async function fetchAndRenderComments() {
-    const response = await fetch("comments", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`GET comments failed: ${response.status}`);
+  function formatCommentTimeRange(start, end) {
+    if (end > start) {
+      return `${formatClock(start)}\u2013${formatClock(end)}`;
     }
-    const records = await response.json();
-    if (!Array.isArray(records)) {
-      throw new Error("Invalid comments payload");
+    return formatClock(start);
+  }
+
+  function compareTextAsc(a, b) {
+    if (a < b) {
+      return -1;
     }
-    renderCommentMarks(records);
-    return records;
+    if (a > b) {
+      return 1;
+    }
+    return 0;
+  }
+
+  function jumpToCommentItem(record) {
+    const targetRow = rows.find((item) => item.take.sha256 === record.take.sha256);
+    if (!targetRow) {
+      return;
+    }
+    const start = Number(record.span.start);
+    const end = Number(record.span.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      return;
+    }
+    if (targetRow.index !== activeIndex) {
+      switchTake(targetRow.index);
+    }
+    selection = {
+      index: targetRow.index,
+      sha256: targetRow.take.sha256,
+      start,
+      end: end > start ? end : start,
+    };
+    loopActive = false;
+    renderSelectionOverlay();
+    updateLoopStatus();
+    seekAll(start);
+  }
+
+  function createCommentAnswerEl(answer) {
+    const answerEl = document.createElement("div");
+    answerEl.className = "comment-answer";
+    answerEl.setAttribute("data-id", String(answer.id));
+
+    const authorEl = document.createElement("span");
+    authorEl.className = "comment-answer-author";
+    authorEl.textContent = String(answer.author || "");
+
+    const textEl = document.createElement("div");
+    textEl.className = "comment-answer-text";
+    textEl.textContent = String(answer.text || "");
+
+    answerEl.append(authorEl, textEl);
+    answerEl._answerSig = JSON.stringify([answer.id, answer.author, answer.text]);
+    return answerEl;
+  }
+
+  function createCommentItemEl(record) {
+    const itemEl = document.createElement("article");
+    itemEl.className = "comment-item";
+    itemEl.setAttribute("data-id", String(record.id));
+
+    const metaEl = document.createElement("div");
+    metaEl.className = "comment-item-meta";
+
+    const kindEl = document.createElement("span");
+    kindEl.className = "comment-item-kind";
+
+    const takeEl = document.createElement("span");
+    takeEl.className = "comment-item-take";
+
+    const timeElSpan = document.createElement("span");
+    timeElSpan.className = "comment-item-time";
+
+    const authorEl = document.createElement("span");
+    authorEl.className = "comment-item-author";
+
+    metaEl.append(kindEl, takeEl, timeElSpan, authorEl);
+
+    const textEl = document.createElement("div");
+    textEl.className = "comment-item-text";
+
+    const answersEl = document.createElement("div");
+    answersEl.className = "comment-answers";
+
+    itemEl.append(metaEl, textEl, answersEl);
+
+    itemEl._fields = { kindEl, takeEl, timeElSpan, authorEl, textEl, answersEl };
+    itemEl._record = record;
+    itemEl.addEventListener("click", (event) => {
+      if (event.target instanceof Element && event.target.closest(".comment-answer")) {
+        return;
+      }
+      if (itemEl._record) {
+        jumpToCommentItem(itemEl._record);
+      }
+    });
+    return itemEl;
+  }
+
+  function updateCommentItemFields(itemEl, record) {
+    const sig = JSON.stringify([
+      record.id,
+      record.kind,
+      record.take.label_shown,
+      record.span.start,
+      record.span.end,
+      record.author,
+      record.text,
+    ]);
+    itemEl._record = record;
+    if (itemEl._itemSig === sig) {
+      return;
+    }
+    itemEl._itemSig = sig;
+    const { kindEl, takeEl, timeElSpan, authorEl, textEl } = itemEl._fields;
+    kindEl.textContent = String(record.kind || "");
+    takeEl.textContent = String(record.take.label_shown || "");
+    timeElSpan.textContent = formatCommentTimeRange(
+      Number(record.span.start),
+      Number(record.span.end)
+    );
+    authorEl.textContent = String(record.author || "");
+    textEl.textContent = String(record.text || "");
+  }
+
+  function reconcileAnswers(answersEl, answers) {
+    const existingById = new Map();
+    for (const child of Array.from(answersEl.children)) {
+      const id = child.getAttribute("data-id");
+      if (id) {
+        existingById.set(id, child);
+      }
+    }
+    const desiredIds = new Set(answers.map((ans) => String(ans.id)));
+    for (const [id, child] of existingById.entries()) {
+      if (!desiredIds.has(id)) {
+        child.remove();
+      }
+    }
+    const ordered = [];
+    for (const answer of answers) {
+      const id = String(answer.id);
+      let child = existingById.get(id);
+      const sig = JSON.stringify([answer.id, answer.author, answer.text]);
+      if (!child) {
+        child = createCommentAnswerEl(answer);
+      } else if (child._answerSig !== sig) {
+        child._answerSig = sig;
+        const authorEl = child.querySelector(".comment-answer-author");
+        const textEl = child.querySelector(".comment-answer-text");
+        if (authorEl) {
+          authorEl.textContent = String(answer.author || "");
+        }
+        if (textEl) {
+          textEl.textContent = String(answer.text || "");
+        }
+      }
+      ordered.push(child);
+    }
+    let cursor = answersEl.firstElementChild;
+    for (const node of ordered) {
+      if (node === cursor) {
+        cursor = cursor.nextElementSibling;
+      } else {
+        answersEl.insertBefore(node, cursor);
+      }
+    }
+  }
+
+  function renderCommentsList(records) {
+    if (!commentsListEl || !Array.isArray(records)) {
+      return;
+    }
+    const roundRecords = [];
+    const replacedIds = new Set();
+    for (const record of records) {
+      if (!record || typeof record !== "object") {
+        continue;
+      }
+      if (pageData.round && record.round !== pageData.round) {
+        continue;
+      }
+      if (!record.id || !record.take || !record.span) {
+        continue;
+      }
+      roundRecords.push(record);
+      if (typeof record.replaces === "string" && record.replaces) {
+        replacedIds.add(record.replaces);
+      }
+    }
+
+    const items = [];
+    const answersByParent = new Map();
+    for (const record of roundRecords) {
+      if (record.kind === "answer") {
+        if (typeof record.answers === "string" && record.answers) {
+          let list = answersByParent.get(record.answers);
+          if (!list) {
+            list = [];
+            answersByParent.set(record.answers, list);
+          }
+          list.push(record);
+        }
+      } else if (!replacedIds.has(String(record.id))) {
+        items.push(record);
+      }
+    }
+
+    items.sort(
+      (a, b) =>
+        Number(a.span.start) - Number(b.span.start) ||
+        compareTextAsc(String(a.created || ""), String(b.created || "")) ||
+        compareTextAsc(String(a.id), String(b.id))
+    );
+    for (const list of answersByParent.values()) {
+      list.sort(
+        (a, b) =>
+          compareTextAsc(String(a.created || ""), String(b.created || "")) ||
+          compareTextAsc(String(a.id), String(b.id))
+      );
+    }
+
+    const prevScrollTop = commentsListEl.scrollTop;
+    const existingById = new Map();
+    for (const child of Array.from(commentsListEl.children)) {
+      const id = child.getAttribute("data-id");
+      if (id) {
+        existingById.set(id, child);
+      }
+    }
+    const desiredIds = new Set(items.map((item) => String(item.id)));
+    for (const [id, child] of existingById.entries()) {
+      if (!desiredIds.has(id)) {
+        child.remove();
+      }
+    }
+
+    const ordered = [];
+    for (const record of items) {
+      const id = String(record.id);
+      let itemEl = existingById.get(id);
+      if (!itemEl) {
+        itemEl = createCommentItemEl(record);
+      }
+      updateCommentItemFields(itemEl, record);
+      reconcileAnswers(itemEl._fields.answersEl, answersByParent.get(id) || []);
+      ordered.push(itemEl);
+    }
+
+    let cursor = commentsListEl.firstElementChild;
+    for (const node of ordered) {
+      if (node === cursor) {
+        cursor = cursor.nextElementSibling;
+      } else {
+        commentsListEl.insertBefore(node, cursor);
+      }
+    }
+    commentsListEl.scrollTop = prevScrollTop;
+  }
+
+  function fetchAndRenderComments(waitForInFlight = false) {
+    if (inFlightCommentsRead) {
+      if (!waitForInFlight) {
+        return inFlightCommentsRead;
+      }
+      return inFlightCommentsRead
+        .catch(() => {})
+        .then(() => fetchAndRenderComments(true));
+    }
+    const run = (async () => {
+      try {
+        const response = await fetch("comments", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`GET comments failed: ${response.status}`);
+        }
+        const records = await response.json();
+        if (!Array.isArray(records)) {
+          throw new Error("Invalid comments payload");
+        }
+        renderCommentMarks(records);
+        renderCommentsList(records);
+        return records;
+      } finally {
+        if (inFlightCommentsRead === run) {
+          inFlightCommentsRead = null;
+        }
+      }
+    })();
+    inFlightCommentsRead = run;
+    return run;
   }
 
   function openCommentBox(row, start, end) {
@@ -363,12 +671,22 @@
     commentBoxEl.scrollIntoView({ block: "nearest" });
   }
 
+  function setCommentInputsDisabled(disabled) {
+    if (commentTextEl) {
+      commentTextEl.disabled = disabled;
+    }
+    if (commentKindEl) {
+      commentKindEl.disabled = disabled;
+    }
+  }
+
   async function saveComment() {
     if (!isServed || !commentTarget || isSaving) {
       return;
     }
     isSaving = true;
     setCommentStatus("saving", "Saving...", true);
+    setCommentInputsDisabled(true);
     const payload = {
       sha256: commentTarget.sha256,
       start: commentTarget.start,
@@ -385,7 +703,11 @@
       if (postResponse.status !== 201) {
         throw new Error(`POST comments failed: ${postResponse.status}`);
       }
-      await fetchAndRenderComments();
+      try {
+        await fetchAndRenderComments(true);
+      } catch (_readErr) {
+        // Saved on disk (201); the next periodic re-read updates the list and marks.
+      }
       if (commentTextEl) {
         commentTextEl.value = "";
       }
@@ -398,6 +720,7 @@
       setCommentStatus("error", "Could not save comment.", false);
     } finally {
       isSaving = false;
+      setCommentInputsDisabled(false);
     }
   }
 
@@ -425,6 +748,21 @@
     }
   }
 
+  function isPastRowEnd(row, timeSeconds) {
+    return timeSeconds >= rowDuration(row) - END_REST_TOLERANCE_S;
+  }
+
+  function isRowEnded(row) {
+    return row.video.ended || isPastRowEnd(row, row.video.currentTime || 0);
+  }
+
+  function stretchFitsTake(sel, row) {
+    if (!sel || sel.end <= sel.start || !row) {
+      return false;
+    }
+    return sel.start >= 0 && sel.end <= rowDuration(row) + END_REST_TOLERANCE_S;
+  }
+
   function seekAll(timeSeconds) {
     const current = activeRow();
     const wasPlaying = Boolean(current && !current.video.paused && !current.video.ended);
@@ -437,8 +775,8 @@
     }
     if (wasPlaying) {
       for (const row of rows) {
-        if (row.video.paused) {
-          playVideoSafe(row.video);
+        if (!isPastRowEnd(row, timeSeconds) && row.video.paused) {
+          playRowForSync(row);
         }
       }
     }
@@ -495,7 +833,10 @@
         row.video.muted = true;
       }
       const duration = rowDuration(row);
-      if (masterTime >= duration - 0.05) {
+      if (row.video.ended || masterTime >= duration - END_REST_TOLERANCE_S) {
+        if (row.video.playbackRate !== 1) {
+          row.video.playbackRate = 1;
+        }
         continue;
       }
       const settleMs = row.hasPicture ? VIDEO_SEEK_SETTLE_MS : AUDIO_SEEK_SETTLE_MS;
@@ -586,7 +927,7 @@
       ) {
         seekAll(selection.start);
         for (const row of rows) {
-          if (row.video.paused) {
+          if (!isPastRowEnd(row, selection.start) && row.video.paused) {
             playRowForSync(row);
           }
         }
@@ -620,9 +961,14 @@
       row.awaitingSeekCalibration = false;
       row.video.muted = row !== current;
       if (row.gainNode) {
-        row.gainNode.gain.value = row === current ? 1 : 0;
+        row.video.volume = 1.0;
+        row.gainNode.gain.value = row === current ? desiredLinearGain(row) : 0;
       }
-      if (row !== current && Math.abs(row.video.currentTime - masterTime) > 0.02) {
+      if (
+        row !== current &&
+        !isRowEnded(row) &&
+        Math.abs(row.video.currentTime - masterTime) > 0.02
+      ) {
         row.video.currentTime = clamp(masterTime, 0, rowDuration(row));
       }
     }
@@ -646,17 +992,23 @@
     } else if (!current.video.ended) {
       const masterTime = current.video.currentTime;
       for (const row of rows) {
-        if (row !== current && Math.abs(row.video.currentTime - masterTime) > 0.02) {
+        if (
+          row !== current &&
+          !(isPastRowEnd(row, masterTime) && isRowEnded(row)) &&
+          Math.abs(row.video.currentTime - masterTime) > 0.02
+        ) {
           row.video.currentTime = clamp(masterTime, 0, rowDuration(row));
         }
       }
     }
+    const startTime = current.video.ended ? 0 : current.video.currentTime;
     for (const row of rows) {
       row.video.playbackRate = 1;
       if (
         needsSilentWebAudioStartup &&
         !row.hasPicture &&
         row !== current &&
+        !isPastRowEnd(row, startTime) &&
         row.video.currentTime < 0.01
       ) {
         const gain = ensureAudioGain(row);
@@ -668,7 +1020,7 @@
       }
     }
     for (const row of rows) {
-      if (row !== current) {
+      if (row !== current && !isPastRowEnd(row, startTime) && !row.video.ended) {
         playVideoSafe(row.video);
       }
     }
@@ -698,7 +1050,10 @@
     const wasPlaying = !prev.video.paused && !prev.video.ended;
 
     // Move the target take while it is still muted when it differs by more than 0.08 s.
-    if (Math.abs(next.video.currentTime - masterTime) > SWITCH_SEEK_TOLERANCE_S) {
+    if (
+      !(isPastRowEnd(next, masterTime) && isRowEnded(next)) &&
+      Math.abs(next.video.currentTime - masterTime) > SWITCH_SEEK_TOLERANCE_S
+    ) {
       next.video.currentTime = clamp(masterTime, 0, rowDuration(next));
     }
     next.video.playbackRate = 1;
@@ -706,12 +1061,18 @@
     activeIndex = nextIndex;
     updateMuteAndActive();
 
-    if (wasPlaying) {
+    if (loopActive && !stretchFitsTake(selection, next)) {
+      loopActive = false;
+      updateLoopStatus();
+    }
+
+    const nextEnded = isPastRowEnd(next, masterTime) || next.video.ended;
+    if (wasPlaying && !nextEnded) {
       if (next.video.paused) {
         playVideoSafe(next.video);
       }
       for (const row of rows) {
-        if (row !== next) {
+        if (row !== next && !isPastRowEnd(row, next.video.currentTime) && !row.video.ended) {
           if (Math.abs(row.video.currentTime - next.video.currentTime) > SYNC_VIDEO_SEEK_THRESHOLD_S) {
             syncSeekRow(row, next.video.currentTime, rowDuration(row));
           }
@@ -723,10 +1084,22 @@
       startRaf();
       startSyncTimer();
     } else {
+      if (nextEnded) {
+        stopRaf();
+        stopSyncTimer();
+      }
       for (const row of rows) {
         row.video.playbackRate = 1;
-        if (row !== next && Math.abs(row.video.currentTime - next.video.currentTime) > 0.02) {
-          row.video.currentTime = clamp(next.video.currentTime, 0, rowDuration(row));
+        if (row !== next) {
+          if (nextEnded && !row.video.paused) {
+            row.video.pause();
+          }
+          if (
+            !(isPastRowEnd(row, next.video.currentTime) && isRowEnded(row)) &&
+            Math.abs(row.video.currentTime - next.video.currentTime) > 0.02
+          ) {
+            row.video.currentTime = clamp(next.video.currentTime, 0, rowDuration(row));
+          }
         }
       }
     }
@@ -739,10 +1112,17 @@
     if (!selection || selection.end <= selection.start) {
       return;
     }
+    const current = activeRow();
+    if (!loopActive && !stretchFitsTake(selection, current)) {
+      if (loopStatusEl) {
+        loopStatusEl.textContent = "Loop: selection outside active take";
+        loopStatusEl.setAttribute("data-active", "false");
+      }
+      return;
+    }
     loopActive = !loopActive;
     updateLoopStatus();
     if (loopActive) {
-      const current = activeRow();
       if (
         current.video.currentTime < selection.start ||
         current.video.currentTime >= selection.end
@@ -921,6 +1301,7 @@
       seekLead: 0,
       lastSeekAt: 0,
       awaitingSeekCalibration: false,
+      marksSig: null,
     };
     rows.push(row);
 
@@ -1096,6 +1477,11 @@
   if (isServed) {
     setCommentStatus("ready", "", false);
     fetchAndRenderComments().catch(() => {});
+    window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        fetchAndRenderComments().catch(() => {});
+      }
+    }, COMMENT_POLL_MS);
   } else {
     setOfflineStatus();
   }

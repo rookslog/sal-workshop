@@ -419,6 +419,110 @@
       color: var(--muted);
     }
 
+    #comments {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+      min-height: 0;
+    }
+
+    #comments:empty {
+      display: none;
+    }
+
+    .comment-item {
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .comment-item:hover {
+      border-color: var(--active-border);
+    }
+
+    .comment-item-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 8px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .comment-item-kind {
+      display: inline-block;
+      padding: 0 5px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--surface-alt);
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .comment-item-take {
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .comment-item-time {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--ink);
+    }
+
+    .comment-item-author {
+      font-family: var(--mono);
+      font-size: 11px;
+      margin-left: auto;
+    }
+
+    .comment-item-text {
+      font-size: 13px;
+      color: var(--ink);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .comment-answers {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .comment-answers:empty {
+      display: none;
+    }
+
+    .comment-answer {
+      padding: 6px 8px;
+      border-left: 3px solid var(--active-border);
+      background: var(--surface-alt);
+      border-radius: 0 4px 4px 0;
+      cursor: default;
+    }
+
+    .comment-answer-author {
+      display: block;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+
+    .comment-answer-text {
+      font-size: 13px;
+      color: var(--ink);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     @media (min-width: 1120px) {
       .rail {
         position: fixed;
@@ -447,6 +551,12 @@
         flex: 1 1 auto;
         min-height: 0;
         overflow-y: auto;
+      }
+
+      #comments {
+        flex: 1 1 auto;
+        min-height: 110px;
+        max-height: none;
       }
 
       #takes {
@@ -512,6 +622,8 @@
             </div>
           </div>
         </section>
+
+        <section id="comments" aria-label="Comments"></section>
 
         <div class="legend">
           <span><kbd>Space</kbd> play/pause</span>

@@ -295,13 +295,15 @@ def test_g4_louder_take_gets_level_match_once(heard_page: OpenedPage, tone_round
     _start_and_switch(page, first=1, second=2)
     enabled, disabled = _measure_level_match(page)
 
-    gains = [take["gain_db"] for take in read_json(tone_round / "build" / "page.json")["takes"]]
-    assert [video["volume"] for video in enabled["videos"]] == pytest.approx(
-        [10 ** (gain / 20) for gain in gains], abs=0.01
-    )
-    assert [video["volume"] for video in disabled["videos"]] == [1.0, 1.0]
-    if enabled["videos"][1]["routed"]:
-        assert _level_change_db(enabled, disabled) == pytest.approx(gains[1], abs=1.0)
+    gain_db = read_json(tone_round / "build" / "page.json")["takes"][1]["gain_db"]
+    louder_on = enabled["videos"][1]
+    louder_off = disabled["videos"][1]
+    assert louder_off["volume"] == 1.0
+    if louder_on["routed"]:
+        assert louder_on["volume"] == 1.0
+        assert _level_change_db(enabled, disabled) == pytest.approx(gain_db, abs=1.0)
+    else:
+        assert louder_on["volume"] == pytest.approx(10 ** (gain_db / 20), abs=0.01)
 
 
 def test_g5_quiet_take_keeps_unity_level(heard_page: OpenedPage, tone_round: Path) -> None:
@@ -309,10 +311,13 @@ def test_g5_quiet_take_keeps_unity_level(heard_page: OpenedPage, tone_round: Pat
     _start_and_switch(page, first=2, second=1)
     enabled, disabled = _measure_level_match(page)
 
-    assert read_json(tone_round / "build" / "page.json")["takes"][0]["gain_db"] == 0.0
-    assert enabled["videos"][0]["volume"] == disabled["videos"][0]["volume"] == 1.0
-    if enabled["videos"][0]["routed"]:
-        assert _level_change_db(enabled, disabled) == pytest.approx(0.0, abs=1.0)
+    gain_db = read_json(tone_round / "build" / "page.json")["takes"][0]["gain_db"]
+    assert gain_db == 0.0
+    quieter_on = enabled["videos"][0]
+    quieter_off = disabled["videos"][0]
+    assert quieter_on["volume"] == quieter_off["volume"] == 1.0
+    if quieter_on["routed"]:
+        assert _level_change_db(enabled, disabled) == pytest.approx(gain_db, abs=1.0)
 
 
 def test_g6_chromium_file_does_not_route_either_take(tone_round: Path) -> None:
