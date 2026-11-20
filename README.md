@@ -15,7 +15,11 @@ several takes in step with their charts, and keeps time-stamped comments as plai
 - `sal round new` and `sal round build` — describe a set of takes to compare and build a review
   page for them: synchronised playback, switching between takes, level matching, looping a stretch.
 
-Saving comments from the page is being built now.
+- `sal round serve rounds/ID` — serves one round's page on this machine only (the loopback address)
+  so that comments written on the page are saved, one plain JSON file per comment, under
+  `records/comments/`.
+- `sal comment add`, `sal comment answer`, `sal inbox` — file a comment from the command line, reply
+  to one, and list the comments nobody has answered yet.
 
 ## Requirements
 
