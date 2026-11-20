@@ -38,6 +38,26 @@ _EMAIL_RE = re.compile(
     r"[A-Za-z0-9._%+-]+" + "@" + r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z0-9-]|\.[A-Za-z0-9-])"
 )
 
+_MAX_FILE_BYTES = 524_288
+_MEDIA_EXTENSIONS = (
+    ".wav",
+    ".aif",
+    ".aiff",
+    ".flac",
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".opus",
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".m4v",
+    ".avi",
+)
+_MEDIA_PREFIXES = (b"fLaC", b"ID3", b"OggS", b"\x1a\x45\xdf\xa3")
+
 
 def _normalize_denylist(denylist: Sequence[str]) -> tuple[str, ...]:
     return tuple(entry.strip().casefold() for entry in denylist if entry.strip())
@@ -98,7 +118,22 @@ def _list_tracked_files(repo: Path) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _check_identity(repo: Path) -> set[tuple[str, int, str]]:
+def _is_media_file(rel_path: str, data: bytes) -> bool:
+    if rel_path.lower().endswith(_MEDIA_EXTENSIONS):
+        return True
+    if data.startswith(_MEDIA_PREFIXES):
+        return True
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        return True
+    if len(data) >= 12:
+        if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+            return True
+        if data[:4] == b"FORM" and data[8:12] in (b"AIFF", b"AIFC"):
+            return True
+    return False
+
+
+def _check_identity(repo: Path, denylist: Sequence[str] = ()) -> set[tuple[str, int, str]]:
     findings: set[tuple[str, int, str]] = set()
 
     cfg = subprocess.run(
@@ -113,27 +148,35 @@ def _check_identity(repo: Path) -> set[tuple[str, int, str]]:
             findings.add(("config", 0, "identity"))
 
     log_result = subprocess.run(
-        ["git", "-C", str(repo), "log", "--all", "--format=%H%x00%ae%x00%ce"],
+        ["git", "-C", str(repo), "log", "--all", "-z", "--format=%H%x00%ae%x00%ce%x00%B"],
         capture_output=True,
-        text=True,
         check=False,
     )
-    if log_result.returncode == 0:
-        for row in log_result.stdout.splitlines():
-            if not row:
-                continue
-            commit_hash, author_email, committer_email = row.split("\x00")
+    if log_result.returncode == 0 and log_result.stdout:
+        fields = log_result.stdout.split(b"\x00")
+        if fields and fields[-1] == b"":
+            fields.pop()
+        if len(fields) % 4 != 0:
+            raise RuntimeError("unexpected git log output format")
+        for idx in range(0, len(fields), 4):
+            commit_hash = fields[idx].decode("utf-8", errors="replace")
+            author_email = fields[idx + 1].decode("utf-8", errors="replace")
+            committer_email = fields[idx + 2].decode("utf-8", errors="replace")
+            message = fields[idx + 3].decode("utf-8", errors="replace")
+            label = f"commit {commit_hash}"
             if (
                 author_email.strip().lower() != _WORKSHOP_EMAIL
                 or committer_email.strip().lower() != _WORKSHOP_EMAIL
             ):
-                findings.add((f"commit {commit_hash}", 0, "identity"))
+                findings.add((label, 0, "identity"))
+            for line_no, rule in scan_text(message, denylist):
+                findings.add((label, line_no, rule))
 
     return findings
 
 
 def check_repo(repo: Path, denylist: Sequence[str] = ()) -> tuple[int, set[tuple[str, int, str]]]:
-    """Scan all tracked files and repository identity in ``repo``."""
+    """Scan all tracked files, commits, and repository identity in ``repo``."""
     rel_paths = _list_tracked_files(repo)
     normalized_deny = _normalize_denylist(denylist)
     findings: set[tuple[str, int, str]] = set()
@@ -150,11 +193,17 @@ def check_repo(repo: Path, denylist: Sequence[str] = ()) -> tuple[int, set[tuple
             if any(entry in path_cf for entry in normalized_deny):
                 findings.add((rel_path, 0, "denylist"))
 
-        text = file_path.read_bytes().decode("utf-8", errors="replace")
+        data = file_path.read_bytes()
+        if _is_media_file(rel_path, data):
+            findings.add((rel_path, 0, "media-file"))
+        if len(data) > _MAX_FILE_BYTES:
+            findings.add((rel_path, 0, "large-file"))
+
+        text = data.decode("utf-8", errors="replace")
         for line_no, rule in scan_text(text, denylist):
             findings.add((rel_path, line_no, rule))
 
-    findings.update(_check_identity(repo))
+    findings.update(_check_identity(repo, denylist))
     return examined, findings
 
 
