@@ -48,10 +48,12 @@ def test_rn2_take_metadata(
     takes = read_json(demo_round[0])["takes"]
     for take, source, label in zip(takes, (take_low_mp4, take_high_mp4), ROUND_LABELS, strict=True):
         assert take["sha256"] == sha256_of(source)
-        path = Path(take["path"])
-        assert path.is_absolute()
-        assert os.path.samefile(path, source)
-        assert path == source.resolve()
+        assert take["path"] == f"media/{take['sha256']}.mp4"
+        path = demo_round[0].parent / take["path"]
+        assert path.is_file() and not path.is_symlink()
+        assert path.read_bytes() == source.read_bytes()
+        assert os.stat(path).st_mode & 0o222 == 0
+        assert take["source"] == str(source.resolve())
         duration = take["duration"]
         assert abs(duration - 12.0) <= 0.06
         assert duration == round(duration, 3)

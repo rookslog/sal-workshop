@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -99,6 +100,60 @@ def _measure_integrated_lufs(input_path: Path) -> float:
     return round(integrated, 3)
 
 
+def _copy_take(src: Path, dst: Path) -> None:
+    """Copy ``src`` to ``dst``, cloning with ``cp -c`` when supported."""
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["cp", "-c", str(src), str(dst)],
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+        except OSError:
+            pass
+        dst.unlink(missing_ok=True)
+    shutil.copyfile(src, dst)
+
+
+def _publish_round(
+    stage_media: Path,
+    stage_round_json: Path,
+    round_dir: Path,
+    round_json_path: Path,
+) -> None:
+    """Atomically publish ``round.json`` and move staged media files into ``round_dir``."""
+    media_dir = round_dir / "media"
+    if media_dir.is_symlink() or (media_dir.exists() and not media_dir.is_dir()):
+        raise ValueError(f"round media path exists and is not a directory: {media_dir}")
+
+    try:
+        os.link(stage_round_json, round_json_path)
+    except FileExistsError as exc:
+        raise ValueError(f"round already exists: {round_json_path}") from exc
+
+    moved_files: list[Path] = []
+    created_media_dir = False
+    try:
+        if not media_dir.exists() and not media_dir.is_symlink():
+            os.replace(stage_media, media_dir)
+            created_media_dir = True
+        else:
+            for src_file in stage_media.iterdir():
+                dst_file = media_dir / src_file.name
+                os.replace(src_file, dst_file)
+                moved_files.append(dst_file)
+    except BaseException:
+        round_json_path.unlink(missing_ok=True)
+        if created_media_dir and media_dir.is_dir() and not media_dir.is_symlink():
+            shutil.rmtree(media_dir, ignore_errors=True)
+        else:
+            for dst_file in moved_files:
+                dst_file.unlink(missing_ok=True)
+        raise
+
+
 def create_round(
     round_id: str,
     *,
@@ -110,7 +165,7 @@ def create_round(
     project: str | None = None,
     root: Path | None = None,
 ) -> Path:
-    """Validate inputs, probe media, and write ``rounds/<id>/round.json``."""
+    """Validate inputs, copy and probe media, and write ``rounds/<id>/round.json``."""
     if not ROUND_ID_RE.fullmatch(round_id):
         raise ValueError(f"invalid round id {round_id!r}: must match ^[a-z0-9][a-z0-9-]{{0,62}}$")
     if not question:
@@ -128,13 +183,10 @@ def create_round(
     if round_dir.exists() and not round_dir.is_dir():
         raise ValueError(f"round path exists and is not a directory: {round_dir}")
     round_json_path = round_dir / "round.json"
-    if round_json_path.exists():
+    if round_json_path.exists() or round_json_path.is_symlink():
         raise ValueError(f"round already exists: {round_json_path}")
 
-    view_spec = VIEWS[view_name]
-    seen_hashes: set[str] = set()
-    takes_payload: list[dict[str, Any]] = []
-
+    resolved_specs: list[tuple[Path, str]] = []
     for index, spec in enumerate(take_specs, start=1):
         raw_path, label = _parse_take_spec(spec, index)
         candidate = Path(raw_path)
@@ -143,41 +195,72 @@ def create_round(
         resolved = candidate.resolve()
         if not TAKE_EXT_RE.fullmatch(resolved.suffix):
             raise ValueError(f"take file must have an alphanumeric extension: {resolved.name}")
+        resolved_specs.append((resolved, label))
 
-        recorder = CommandRecorder(resolved)
-        media = probe_media(resolved, recorder)
-        if view_spec.requires_audio and not media.has_audio:
-            raise ValueError(f"take {index} has no audio stream required by view {view_name!r}")
-        if view_spec.requires_video and not media.has_video:
-            raise ValueError(f"take {index} has no video stream required by view {view_name!r}")
-        if media.sha256 in seen_hashes:
-            raise ValueError(f"duplicate take sha256: {media.sha256}")
-        seen_hashes.add(media.sha256)
+    view_spec = VIEWS[view_name]
+    seen_hashes: set[str] = set()
+    takes_payload: list[dict[str, Any]] = []
 
-        takes_payload.append(
-            {
-                "sha256": media.sha256,
-                "path": str(resolved),
-                "duration": media.duration,
-                "label": label,
-                "control": index == control,
-            }
-        )
-
-    payload: dict[str, Any] = {
-        "schema": "sal.round/1",
-        "id": round_id,
-        "created": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "project": project,
-        "question": question,
-        "blind": blind,
-        "views": [view_name],
-        "takes": takes_payload,
-    }
-
-    encoded = _format_json(payload).encode("utf-8")
     round_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write_bytes(round_json_path, encoded)
+    stage_dir = Path(tempfile.mkdtemp(dir=round_dir, prefix=".new-tmp-"))
+    stage_media = stage_dir / "media"
+    stage_media.mkdir()
+    try:
+        for index, (resolved, label) in enumerate(resolved_specs, start=1):
+            tmp_copy = stage_media / f".take-{index}{resolved.suffix}"
+            _copy_take(resolved, tmp_copy)
+            os.chmod(tmp_copy, 0o444)
+
+            recorder = CommandRecorder(tmp_copy)
+            media = probe_media(tmp_copy, recorder)
+            if view_spec.requires_audio and not media.has_audio:
+                raise ValueError(f"take {index} has no audio stream required by view {view_name!r}")
+            if view_spec.requires_video and not media.has_video:
+                raise ValueError(f"take {index} has no video stream required by view {view_name!r}")
+            if media.sha256 in seen_hashes:
+                raise ValueError(f"duplicate take sha256: {media.sha256}")
+            seen_hashes.add(media.sha256)
+
+            rel_media_path = f"media/{media.sha256}{resolved.suffix}"
+            os.replace(tmp_copy, stage_dir / rel_media_path)
+
+            takes_payload.append(
+                {
+                    "sha256": media.sha256,
+                    "path": rel_media_path,
+                    "source": str(resolved),
+                    "duration": media.duration,
+                    "label": label,
+                    "control": index == control,
+                }
+            )
+
+        payload: dict[str, Any] = {
+            "schema": "sal.round/1",
+            "id": round_id,
+            "created": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "project": project,
+            "question": question,
+            "blind": blind,
+            "views": [view_name],
+            "takes": takes_payload,
+        }
+
+        encoded = _format_json(payload).encode("utf-8")
+        stage_round_json = stage_dir / "round.json"
+        stage_round_json.write_bytes(encoded)
+        _publish_round(stage_media, stage_round_json, round_dir, round_json_path)
+    except BaseException:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        try:
+            round_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    finally:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir, ignore_errors=True)
+
     return round_json_path
 
 
@@ -249,6 +332,25 @@ def _swap_build_dir(stage_dir: Path, build_dir: Path) -> None:
         shutil.rmtree(backup_dir)
 
 
+def _resolve_round_take_path(round_dir: Path, raw_path: Any) -> Path:
+    """Resolve a take's ``path`` relative to ``round_dir`` inside ``media/``."""
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ValueError("take path must be a non-empty string")
+    rel = Path(raw_path)
+    if rel.is_absolute() or ".." in rel.parts or len(rel.parts) != 2 or rel.parts[0] != "media":
+        raise ValueError(f"take path must be media/<file> inside round: {raw_path!r}")
+    media_dir = round_dir / "media"
+    if media_dir.is_symlink() or not media_dir.is_dir():
+        raise ValueError(f"round media directory is missing or invalid: {media_dir}")
+    take_path = round_dir / rel
+    if take_path.is_symlink() or not take_path.is_file():
+        raise ValueError(f"take file is missing or invalid: {take_path}")
+    resolved_take = take_path.resolve()
+    if not resolved_take.is_relative_to(media_dir.resolve()):
+        raise ValueError(f"take path escapes round media/: {raw_path!r}")
+    return resolved_take
+
+
 def build_round(round_dir: Path, *, seed: int | None = None) -> tuple[Path, int]:
     """Verify take integrity, compute loudness/order, render views, and write ``build/``."""
     round_data = _load_round_json(round_dir / "round.json")
@@ -261,16 +363,16 @@ def build_round(round_dir: Path, *, seed: int | None = None) -> tuple[Path, int]
     round_id = str(round_data["id"])
 
     # Re-verify every take file before creating or touching anything under build/.
+    take_paths_by_sha: dict[str, Path] = {}
     for take in takes:
-        take_path = Path(str(take["path"]))
-        if not take_path.is_file():
-            raise ValueError(f"take file is missing: {take_path}")
+        take_path = _resolve_round_take_path(round_dir, take.get("path"))
         expected_sha = str(take["sha256"])
         actual_sha = sha256_file(take_path)
         if actual_sha != expected_sha:
             raise ValueError(
                 f"sha256 mismatch for {take_path}: expected {expected_sha}, got {actual_sha}"
             )
+        take_paths_by_sha[expected_sha] = take_path
 
     if blind:
         order = list(range(len(takes)))
@@ -282,7 +384,7 @@ def build_round(round_dir: Path, *, seed: int | None = None) -> tuple[Path, int]
     lufs_by_sha: dict[str, float] = {}
     for take, _ in ordered:
         sha = str(take["sha256"])
-        lufs_by_sha[sha] = _measure_integrated_lufs(Path(str(take["path"])))
+        lufs_by_sha[sha] = _measure_integrated_lufs(take_paths_by_sha[sha])
 
     programme_lufs = [lufs for lufs in lufs_by_sha.values() if lufs > -69.0]
     gain_by_sha: dict[str, float] = {}
@@ -305,14 +407,15 @@ def build_round(round_dir: Path, *, seed: int | None = None) -> tuple[Path, int]
 
         for take, shown in ordered:
             sha = str(take["sha256"])
-            source_path = Path(str(take["path"]))
+            source_path = take_paths_by_sha[sha]
             ext = source_path.suffix
             if not TAKE_EXT_RE.fullmatch(ext):
                 raise ValueError(f"take file has unsupported extension: {source_path.name}")
 
             take_stage = stage_dir / "takes" / sha
             take_stage.mkdir(parents=True, exist_ok=True)
-            os.symlink(str(source_path), take_stage / f"media{ext}")
+            rel_link_target = os.path.relpath(source_path, take_stage.resolve())
+            os.symlink(rel_link_target, take_stage / f"media{ext}")
 
             view_out = take_stage / view_name
             _, view_json_path = render_view(view_name, source_path, view_out)

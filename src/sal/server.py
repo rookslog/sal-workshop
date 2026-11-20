@@ -105,8 +105,10 @@ def _parse_byte_range(header_value: str | None, size: int) -> tuple[str, int, in
         return ("invalid", 0, 0)
 
 
-def _resolve_build_file(build_dir: Path, build_resolved: Path, request_target: str) -> Path | None:
-    """Resolve ``request_target`` strictly inside ``build_dir``, following leaf media symlinks."""
+def _resolve_build_file(
+    build_dir: Path, build_resolved: Path, media_dir: Path, request_target: str
+) -> Path | None:
+    """Resolve ``request_target`` inside ``build_dir``, following links only into ``media/``."""
     raw_path = urlsplit(request_target).path
     if "\x00" in raw_path or "\\" in raw_path:
         return None
@@ -134,7 +136,21 @@ def _resolve_build_file(build_dir: Path, build_resolved: Path, request_target: s
         return None
 
     candidate = current / parts[-1]
+    if candidate.is_symlink():
+        if media_dir.is_symlink() or not media_dir.is_dir():
+            return None
+        media_resolved = media_dir.resolve()
+        try:
+            target = candidate.resolve(strict=True)
+        except OSError:
+            return None
+        if not target.is_file() or not target.is_relative_to(media_resolved):
+            return None
+        return target
+
     if not candidate.is_file():
+        return None
+    if not candidate.resolve().is_relative_to(build_resolved):
         return None
     return candidate
 
@@ -151,16 +167,15 @@ class RoundHTTPServer(ThreadingHTTPServer):
         server_address: tuple[str, int],
         round_id: str,
         root: Path,
+        round_dir: Path,
         build_dir: Path,
-        duration_by_sha: dict[str, float],
-        label_shown_by_sha: dict[str, str],
     ) -> None:
         self.round_id = round_id
         self.root = root
+        self.round_dir = round_dir
+        self.media_dir = round_dir / "media"
         self.build_dir = build_dir
         self.build_resolved = build_dir.resolve()
-        self.duration_by_sha = duration_by_sha
-        self.label_shown_by_sha = label_shown_by_sha
         super().__init__(server_address, _RoundRequestHandler)
 
 
@@ -296,7 +311,7 @@ class _RoundRequestHandler(BaseHTTPRequestHandler):
             return
 
         file_path = _resolve_build_file(
-            self.server.build_dir, self.server.build_resolved, self.path
+            self.server.build_dir, self.server.build_resolved, self.server.media_dir, self.path
         )
         if file_path is None:
             self._send_empty(404)
@@ -353,7 +368,7 @@ class _RoundRequestHandler(BaseHTTPRequestHandler):
             return
 
         sha256 = payload["sha256"]
-        if not isinstance(sha256, str) or sha256 not in self.server.duration_by_sha:
+        if not isinstance(sha256, str):
             self._send_empty(400)
             return
 
@@ -368,13 +383,25 @@ class _RoundRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            round_id, duration_by_sha, label_shown_by_sha = load_round_context(
+                self.server.round_dir
+            )
+        except (ValueError, OSError):
+            self._send_empty(500)
+            return
+
+        if sha256 not in duration_by_sha:
+            self._send_empty(400)
+            return
+
+        try:
             start, end = validate_span_bounds(
-                payload["start"], payload["end"], self.server.duration_by_sha[sha256]
+                payload["start"], payload["end"], duration_by_sha[sha256]
             )
             record = build_comment_record(
-                round_id=self.server.round_id,
+                round_id=round_id,
                 sha256=sha256,
-                label_shown=self.server.label_shown_by_sha[sha256],
+                label_shown=label_shown_by_sha[sha256],
                 start=start,
                 end=end,
                 kind=kind,
@@ -408,18 +435,19 @@ def create_server(round_dir: Path, port: int = 0) -> ThreadingHTTPServer:
 
     resolved_round = round_dir.resolve()
     build_dir = resolved_round / "build"
+    if build_dir.is_symlink():
+        raise ValueError(f"refusing to serve symlinked build directory: {build_dir}")
     if not build_dir.is_dir():
         raise ValueError(f"round has not been built (missing {build_dir})")
 
-    round_id, duration_by_sha, label_shown_by_sha = load_round_context(resolved_round)
+    round_id, _, _ = load_round_context(resolved_round)
     root = resolved_round.parent.parent
     return RoundHTTPServer(
         ("127.0.0.1", port),
         round_id=round_id,
         root=root,
+        round_dir=resolved_round,
         build_dir=build_dir,
-        duration_by_sha=duration_by_sha,
-        label_shown_by_sha=label_shown_by_sha,
     )
 
 

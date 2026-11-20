@@ -3,7 +3,7 @@ import os
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
-from shutil import copyfile
+from shutil import copyfile, copytree
 
 import pytest
 from conftest import (
@@ -107,7 +107,7 @@ def test_rb3_media_symlinks_and_views(plain_round: Path) -> None:
         directory = plain_round / "build" / "takes" / take["sha256"]
         link = directory / "media.mp4"
         assert link.is_symlink()
-        assert os.path.samefile(link, take["path"])
+        assert os.path.samefile(link, plain_round / take["path"])
         _, view = load_view(directory / "audio_basic")
         assert_schema("view-1", view)
         assert view["input"]["sha256"] == take["sha256"]
@@ -234,8 +234,7 @@ def test_rb10_same_seed_same_bytes_across_roots(
     first, second = (root / "rounds" / "r1" for root in roots)
     process = run_round_new(roots[0], [str(take_low_mp4), str(take_high_mp4)])
     assert process.returncode == 0, process.stderr
-    second.mkdir(parents=True)
-    copyfile(first / "round.json", second / "round.json")
+    copytree(first, second)
     for root in roots:
         process = run_round_build(root, seed=7)
         assert process.returncode == 0, process.stderr
@@ -259,18 +258,21 @@ def test_rb12_index_embeds_page_json(plain_round: Path) -> None:
     assert _embedded_page_data(build) == read_json(build / "page.json")
 
 
-def test_rb13_changed_take_refuses_first_build(
+def test_rb13_t2_overwritten_source_uses_kept_take(
     tmp_path: Path, take_low_mp4: Path, take_high_mp4: Path
 ) -> None:
     source = tmp_path / "take.mp4"
     copyfile(take_low_mp4, source)
+    original = source.read_bytes()
+    sha256 = sha256_of(source)
     result = run_round_new(tmp_path, [str(source), str(take_high_mp4)])
     assert result.returncode == 0, result.stderr
     copyfile(take_high_mp4, source)
     result = run_round_build(tmp_path)
-    assert result.returncode != 0
-    assert "sha256" in result.stderr
-    assert not (tmp_path / "rounds" / "r1" / "build").exists()
+    assert result.returncode == 0, result.stderr
+    round_dir = tmp_path / "rounds" / "r1"
+    assert (round_dir / "build" / "takes" / sha256 / "media.mp4").read_bytes() == original
+    assert _page_takes(round_dir)[0]["sha256"] == sha256
 
 
 def _snapshot_build(build: Path) -> dict[str, tuple[Path | None, bytes]]:
@@ -280,18 +282,22 @@ def _snapshot_build(build: Path) -> dict[str, tuple[Path | None, bytes]]:
     }
 
 
-def test_rb14_changed_take_preserves_existing_build(
+def test_rb14_t4_corrupt_kept_take_preserves_existing_build(
     tmp_path: Path, take_low_mp4: Path, take_high_mp4: Path
 ) -> None:
     source = tmp_path / "take.mp4"
     copyfile(take_low_mp4, source)
-    build = make_round(tmp_path, (source, take_high_mp4)) / "build"
-    copyfile(take_high_mp4, source)
-    # The media symlink already reads the changed source before the refused build runs.
+    round_dir = make_round(tmp_path, (source, take_high_mp4))
+    build = round_dir / "build"
+    kept = round_dir / "media" / f"{sha256_of(source)}.mp4"
+    kept.chmod(kept.stat().st_mode | 0o200)
+    copyfile(take_high_mp4, kept)
+    # Snapshot after corruption: the media symlink already reads the changed copy.
     before = _snapshot_build(build)
     assert before
     result = run_round_build(tmp_path)
     assert result.returncode != 0
+    assert "sha256" in result.stderr
     assert _snapshot_build(build) == before
 
 

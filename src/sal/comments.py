@@ -288,6 +288,9 @@ def load_round_context(round_dir: Path) -> tuple[str, dict[str, float], dict[str
     round_id = round_data.get("id")
     if not isinstance(round_id, str) or not ROUND_ID_RE.fullmatch(round_id):
         raise ValueError(f"invalid round id in {round_json_path}")
+    blind = round_data.get("blind")
+    if not isinstance(blind, bool):
+        raise ValueError(f"invalid blind flag in {round_json_path}")
     takes = round_data.get("takes")
     if not isinstance(takes, list) or not takes:
         raise ValueError(f"invalid takes list in {round_json_path}")
@@ -310,11 +313,15 @@ def load_round_context(round_dir: Path) -> tuple[str, dict[str, float], dict[str
         label_shown_by_sha[sha] = label
 
     private_path = round_dir / "build.private.json"
+    if blind and not private_path.is_file():
+        raise ValueError(f"blind round requires {private_path}")
+
     if private_path.is_file():
         try:
             private_data = json.loads(private_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"cannot read {private_path}: {exc}") from exc
+        shown_from_private: dict[str, str] = {}
         if isinstance(private_data, dict) and isinstance(private_data.get("takes"), list):
             for entry in private_data["takes"]:
                 if isinstance(entry, dict):
@@ -326,7 +333,10 @@ def load_round_context(round_dir: Path) -> tuple[str, dict[str, float], dict[str
                         and isinstance(shown, str)
                         and shown
                     ):
-                        label_shown_by_sha[sha] = shown
+                        shown_from_private[sha] = shown
+        if blind and shown_from_private.keys() != label_shown_by_sha.keys():
+            raise ValueError(f"incomplete take mapping in {private_path}")
+        label_shown_by_sha.update(shown_from_private)
 
     return round_id, duration_by_sha, label_shown_by_sha
 

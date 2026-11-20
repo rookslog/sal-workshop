@@ -792,3 +792,70 @@ def _audio_round_fixture():
 
 
 audio_round = _audio_round_fixture()
+
+
+def _comment_save_helper():
+    import json
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from playwright.sync_api import Page
+
+    def save_on_page(
+        page: "Page", index: int, start: float, end: float, kind: str, text: str
+    ) -> None:
+        from sal.views.ruler import Ruler, time_to_x
+
+        # Read the same view geometry as view_x, but from the served page's embedded manifest.
+        manifest = page.locator("#page-data").text_content()
+        assert manifest is not None
+        view = json.loads(manifest)["takes"][index - 1]["view"]
+        ruler = Ruler(**view["ruler"])
+        chart = page.locator(f'.take[data-index="{index}"] img.view-image')
+        chart.scroll_into_view_if_needed()
+        box = chart.bounding_box()
+        assert box is not None
+        scale = box["width"] / view["width"]
+        x_start = box["x"] + time_to_x(start, ruler) * scale
+        x_end = box["x"] + time_to_x(end, ruler) * scale
+        y = box["y"] + box["height"] / 2
+
+        if start == end:
+            page.mouse.click(x_start, y)
+        else:
+            page.mouse.move(x_start, y)
+            page.mouse.down()
+            page.mouse.move(x_end, y, steps=8)
+            page.mouse.up()
+
+        page.locator("#comment-kind").select_option(kind)
+        page.locator("#comment-text").fill(text)
+        page.locator("#comment-save").click()
+        page.locator('#comment-status[data-state="saved"]').wait_for(state="attached", timeout=3000)
+
+    return save_on_page
+
+
+save_on_page = _comment_save_helper()
+
+
+def _uneven_round_fixture():
+    import pytest
+    from media import make_video, make_wav
+
+    @pytest.fixture(scope="module")
+    def uneven_round(tmp_path_factory: pytest.TempPathFactory, take_low_mp4: Path) -> Path:
+        root = tmp_path_factory.mktemp("uneven-round")
+        audio = make_wav(root / "short.wav", [(5.0, 1000, 0.2)])
+        short = make_video(
+            root / "short.mp4",
+            [("move", 50, RED), ("move", 50, GREEN), ("move", 25, BLUE)],
+            fps="25",
+            audio=audio,
+        )
+        return make_round(root, (take_low_mp4, short))
+
+    return uneven_round
+
+
+uneven_round = _uneven_round_fixture()
