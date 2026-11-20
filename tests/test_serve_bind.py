@@ -1,8 +1,18 @@
+import json
+import os
+import re
 import socket
+import subprocess
+import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from select import select
 from threading import Thread
+from time import monotonic
+from typing import BinaryIO
+from urllib.parse import urlsplit
 
 import pytest
 from conftest import http
@@ -52,3 +62,82 @@ def test_b2_binds_to_loopback_and_ephemeral_port(
 
     assert host == "127.0.0.1"
     assert port > 0
+
+
+@contextmanager
+def _start_default_server(round_dir: Path) -> Iterator[subprocess.Popen[bytes]]:
+    root = round_dir.parent.parent
+    args = [sys.executable, "-m", "sal", "round", "serve", str(round_dir.relative_to(root))]
+    with subprocess.Popen(args, cwd=root, stdout=subprocess.PIPE) as process:
+        try:
+            yield process
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
+def _announced_url(stream: BinaryIO) -> str:
+    deadline = monotonic() + 5
+    pending = bytearray()
+    while b"\n" not in pending:
+        remaining = deadline - monotonic()
+        assert remaining > 0 and select([stream], [], [], remaining)[0], (
+            "round serve did not flush its URL"
+        )
+        chunk = os.read(stream.fileno(), 4096)
+        assert chunk, "round serve closed stdout before announcing its URL"
+        pending.extend(chunk)
+    return json.loads(pending.partition(b"\n")[0])["url"]
+
+
+def test_b3_default_port_is_free_for_each_server(comment_round: Path) -> None:
+    with (
+        _start_default_server(comment_round) as first,
+        _start_default_server(comment_round) as second,
+    ):
+        assert first.stdout is not None and second.stdout is not None
+        first_url = _announced_url(first.stdout)
+        second_url = _announced_url(second.stdout)
+        assert urlsplit(first_url).port != urlsplit(second_url).port
+
+        for url in (first_url, second_url):
+            status, _, _ = http("GET", url)
+            assert status == 200, url
+
+
+def test_b4_explicit_port_in_use_is_refused(comment_round: Path) -> None:
+    root = comment_round.parent.parent
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "sal",
+                "round",
+                "serve",
+                str(comment_round.relative_to(root)),
+                "--port",
+                str(port),
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1, result.stderr
+    assert re.search(rf"\b{port}\b", result.stderr), result.stderr
+    assert "in use" in result.stderr
+    assert "--port" in result.stderr
+    assert "Traceback" not in result.stderr

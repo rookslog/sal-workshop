@@ -459,7 +459,7 @@ def create_server(round_dir: Path, port: int = 0) -> ThreadingHTTPServer:
     )
 
 
-def serve_round(round_dir: Path, *, port: int = 8765) -> int:
+def serve_round(round_dir: Path, *, port: int = 0) -> int:
     """Serve ``round_dir`` on 127.0.0.1, print its URL line, and stop cleanly on signals."""
     server = create_server(round_dir, port=port)
     actual_port = server.server_address[1]

@@ -1,6 +1,7 @@
 """Command-line interface for sal."""
 
 import argparse
+import errno
 import json
 import platform
 import sys
@@ -105,7 +106,16 @@ def _cmd_round_serve(args: argparse.Namespace) -> int:
     """Serve a review round locally over HTTP on 127.0.0.1."""
     try:
         return serve_round(Path(args.round_dir), port=args.port)
-    except (ValueError, RuntimeError, OSError) as exc:
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE and args.port > 0:
+            print(
+                f"port {args.port} is already in use; leave --port out to use a free port",
+                file=sys.stderr,
+            )
+            return 1
+        print(str(exc), file=sys.stderr)
+        return 1
+    except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -301,9 +311,9 @@ def _build_parser() -> argparse.ArgumentParser:
     round_serve_parser.add_argument(
         "--port",
         type=int,
-        default=8765,
+        default=0,
         metavar="N",
-        help="Port on 127.0.0.1 (default: 8765; 0 picks a free port).",
+        help="Port on 127.0.0.1 (default: 0, picks a free port).",
     )
     round_serve_parser.set_defaults(func=_cmd_round_serve)
 

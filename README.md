@@ -24,7 +24,8 @@ several takes in step with their charts, and keeps time-stamped comments as plai
 - `sal round serve rounds/ID` — serves one round's page on this machine only (the loopback address,
   and only to its own page) so that comments written on the page are saved, one plain JSON file
   per comment, under `records/comments/`. The page lists the comments in order of time, with the
-  answers to each underneath, and keeps the list current.
+  answers to each underneath, and keeps the list current. The command prints the page's address;
+  it takes a free port unless `--port N` asks for one (use that to keep the same address).
 - `sal comment add`, `sal comment answer`, `sal inbox` — file a comment from the command line, reply
   to one, and list the comments nobody has answered yet.
 
