@@ -19,7 +19,8 @@
    it. You may add tests.
 4. Never weaken the gate: no skipped tests, no ignored lint rules, no `type: ignore` without the
    reason on the same line.
-5. Tests make their own media with `ffmpeg`'s generators. Nothing copyrighted is committed.
+5. Tests make their own media, in code or with `ffmpeg`'s generators. Nothing copyrighted is
+   committed.
 6. Say what you measured, not how something sounds or looks.
 7. "I could not make this pass, and here is why" is a good result. A passing gate reached by
    changing what is checked is not.

@@ -47,7 +47,7 @@
         "t1": {"type": "number", "exclusiveMinimum": 0},
         "ticks": {
           "type": "array",
-          "minItems": 2,
+          "minItems": 3,
           "items": {
             "type": "object",
             "additionalProperties": false,
