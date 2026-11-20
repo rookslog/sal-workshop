@@ -77,10 +77,36 @@ def test_a3_switch_back_keeps_takes_together(long_page: Page) -> None:
         assert abs(t1 - second[0]) <= 0.08
 
 
-def test_a4_takes_follow_playing_view_seek(long_page: Page) -> None:
+def test_a4_takes_follow_playing_view_seek(long_page: Page, browser_name: str) -> None:
     page = long_page
     page.keyboard.press("Space")
     page.wait_for_timeout(1000)
+
+    if browser_name == "webkit":
+        from time import monotonic
+
+        deadline = monotonic() + 8
+        _click_view(page, 1, 20.0)
+        page.keyboard.press("Escape")
+        readings = []
+        while monotonic() < deadline:
+            readings = sample(page, 250, 5)
+            if monotonic() > deadline:
+                break
+            if not all(
+                len(videos) == 2
+                and all(
+                    current_time >= 20.0 and not paused and abs(current_time - videos[0][0]) <= 0.08
+                    for current_time, _, paused, _ in videos
+                )
+                for videos in readings
+            ):
+                continue
+            advance = readings[-1][0][0] - readings[0][0][0]
+            if advance == pytest.approx(1.0, abs=0.3):
+                return
+        raise AssertionError(f"Takes did not settle within 8 s after the view click: {readings!r}")
+
     _click_view(page, 1, 20.0)
     page.keyboard.press("Escape")
     page.wait_for_timeout(1500)
