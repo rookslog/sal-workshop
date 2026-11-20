@@ -103,19 +103,150 @@ def _load_denylist() -> list[str]:
     return [line.strip() for line in content.splitlines() if line.strip()]
 
 
-def _list_tracked_files(repo: Path) -> list[str]:
+def _has_head(repo: Path) -> bool:
     result = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "-z"],
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD"],
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _list_head_entries(repo: Path) -> list[tuple[str, str, str]]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", "-r", "-z", "HEAD"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git ls-tree failed: {message}")
+    entries: list[tuple[str, str, str]] = []
+    for raw in result.stdout.split(b"\x00"):
+        if not raw:
+            continue
+        meta, sep, raw_path = raw.partition(b"\t")
+        if not sep:
+            raise RuntimeError("unexpected git ls-tree output format")
+        mode, obj_type, sha = meta.decode("ascii").split()
+        if obj_type != "blob":
+            continue
+        rel_path = raw_path.decode("utf-8", errors="surrogateescape")
+        entries.append((rel_path, mode, sha))
+    return entries
+
+
+def _list_index_entries(repo: Path) -> list[tuple[str, str, str]]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-s", "-z"],
         capture_output=True,
         check=False,
     )
     if result.returncode != 0:
         message = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"git ls-files failed: {message}")
-    paths = [
-        raw.decode("utf-8", errors="surrogateescape") for raw in result.stdout.split(b"\x00") if raw
-    ]
-    return list(dict.fromkeys(paths))
+    entries: list[tuple[str, str, str]] = []
+    for raw in result.stdout.split(b"\x00"):
+        if not raw:
+            continue
+        meta, sep, raw_path = raw.partition(b"\t")
+        if not sep:
+            raise RuntimeError("unexpected git ls-files -s output format")
+        mode, sha, _stage = meta.decode("ascii").split()
+        if mode == "160000":
+            continue
+        rel_path = raw_path.decode("utf-8", errors="surrogateescape")
+        entries.append((rel_path, mode, sha))
+    return entries
+
+
+def _list_history_entries(repo: Path, has_head: bool) -> list[tuple[str, str, str, str]]:
+    rev_args = ["--all", "HEAD"] if has_head else ["--all"]
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "log",
+            *rev_args,
+            "--raw",
+            "--no-abbrev",
+            "--no-renames",
+            "-m",
+            "-z",
+            "--format=__COMMIT__%H",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git log failed: {message}")
+    entries: list[tuple[str, str, str, str]] = []
+    tokens = iter(result.stdout.split(b"\x00"))
+    current_commit: str | None = None
+    for raw_tok in tokens:
+        if not raw_tok:
+            continue
+        if raw_tok.startswith(b"__COMMIT__"):
+            current_commit = raw_tok[len(b"__COMMIT__") :].decode("ascii")
+            continue
+        stripped = raw_tok.lstrip(b"\n")
+        if stripped.startswith(b":"):
+            parts = stripped[1:].decode("ascii").split()
+            if len(parts) < 5:
+                raise RuntimeError("unexpected git log --raw output format")
+            new_mode = parts[1]
+            new_sha = parts[3]
+            raw_path = next(tokens, None)
+            if raw_path is None:
+                raise RuntimeError("unexpected git log --raw path")
+            if current_commit is None:
+                raise RuntimeError("git log --raw entry without commit")
+            if new_mode in ("000000", "160000") or set(new_sha) == {"0"}:
+                continue
+            rel_path = raw_path.decode("utf-8", errors="surrogateescape")
+            entries.append((current_commit, rel_path, new_mode, new_sha))
+    return entries
+
+
+def _read_blobs(repo: Path, shas: Sequence[str]) -> dict[str, bytes]:
+    unique_shas = list(dict.fromkeys(shas))
+    if not unique_shas:
+        return {}
+    stdin_bytes = ("\n".join(unique_shas) + "\n").encode("ascii")
+    result = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "--batch"],
+        input=stdin_bytes,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git cat-file failed: {message}")
+    blobs: dict[str, bytes] = {}
+    buf = result.stdout
+    pos = 0
+    total = len(buf)
+    while pos < total:
+        nl = buf.find(b"\n", pos)
+        if nl == -1:
+            raise RuntimeError("unexpected git cat-file --batch output")
+        header = buf[pos:nl].decode("ascii", errors="replace").split()
+        pos = nl + 1
+        if len(header) == 2 and header[1] == "missing":
+            continue
+        if len(header) != 3:
+            raise RuntimeError("unexpected git cat-file --batch header")
+        obj_sha, obj_type, size_str = header
+        size = int(size_str)
+        data = buf[pos : pos + size]
+        if len(data) != size:
+            raise RuntimeError("truncated git cat-file --batch object")
+        pos += size + 1
+        if obj_type == "blob":
+            blobs[obj_sha] = data
+    return blobs
 
 
 def _is_media_file(rel_path: str, data: bytes) -> bool:
@@ -175,33 +306,80 @@ def _check_identity(repo: Path, denylist: Sequence[str] = ()) -> set[tuple[str, 
     return findings
 
 
+def _scan_git_entry(
+    location: str,
+    rel_path: str,
+    mode: str,
+    data: bytes,
+    denylist: Sequence[str],
+    normalized_deny: tuple[str, ...],
+    findings: set[tuple[str, int, str]],
+) -> None:
+    if normalized_deny:
+        path_cf = rel_path.casefold()
+        if any(entry in path_cf for entry in normalized_deny):
+            findings.add((location, 0, "denylist"))
+
+    if mode == "120000":
+        target_text = data.decode("utf-8", errors="replace")
+        for _, rule in scan_text(target_text, denylist):
+            findings.add((location, 0, rule))
+        return
+
+    if _is_media_file(rel_path, data):
+        findings.add((location, 0, "media-file"))
+    if len(data) > _MAX_FILE_BYTES:
+        findings.add((location, 0, "large-file"))
+
+    text = data.decode("utf-8", errors="replace")
+    for line_no, rule in scan_text(text, denylist):
+        findings.add((location, line_no, rule))
+
+
 def check_repo(repo: Path, denylist: Sequence[str] = ()) -> tuple[int, set[tuple[str, int, str]]]:
-    """Scan all tracked files, commits, and repository identity in ``repo``."""
-    rel_paths = _list_tracked_files(repo)
+    """Scan ``HEAD``, index, commit history, and repository identity in ``repo``."""
+    index_entries = _list_index_entries(repo)
+    has_head = _has_head(repo)
+    head_entries = _list_head_entries(repo) if has_head else []
     normalized_deny = _normalize_denylist(denylist)
     findings: set[tuple[str, int, str]] = set()
-    examined = 0
 
-    for rel_path in rel_paths:
-        file_path = repo / rel_path
-        if not file_path.is_file():
+    current_entries = head_entries + index_entries
+    examined = len({rel_path for rel_path, _, _ in current_entries})
+    current_path_shas = {(rel_path, sha) for rel_path, _, sha in current_entries}
+    seen_blobs: set[str] = {sha for _, _, sha in current_entries}
+
+    current_blobs = _read_blobs(repo, [sha for _, _, sha in current_entries])
+    for rel_path, mode, sha in dict.fromkeys(current_entries):
+        data = current_blobs.get(sha)
+        if data is None:
             continue
-        examined += 1
+        _scan_git_entry(rel_path, rel_path, mode, data, denylist, normalized_deny, findings)
 
-        if normalized_deny:
-            path_cf = rel_path.casefold()
-            if any(entry in path_cf for entry in normalized_deny):
-                findings.add((rel_path, 0, "denylist"))
+    history_entries = _list_history_entries(repo, has_head)
+    pending_history: list[tuple[str, str, str, str]] = []
+    for commit_hash, rel_path, mode, sha in history_entries:
+        if (rel_path, sha) in current_path_shas:
+            continue
+        location = f"commit {commit_hash}:{rel_path}"
+        if sha in seen_blobs:
+            if normalized_deny:
+                path_cf = rel_path.casefold()
+                if any(entry in path_cf for entry in normalized_deny):
+                    findings.add((location, 0, "denylist"))
+            if mode != "120000" and rel_path.lower().endswith(_MEDIA_EXTENSIONS):
+                findings.add((location, 0, "media-file"))
+            continue
+        seen_blobs.add(sha)
+        pending_history.append((commit_hash, rel_path, mode, sha))
 
-        data = file_path.read_bytes()
-        if _is_media_file(rel_path, data):
-            findings.add((rel_path, 0, "media-file"))
-        if len(data) > _MAX_FILE_BYTES:
-            findings.add((rel_path, 0, "large-file"))
-
-        text = data.decode("utf-8", errors="replace")
-        for line_no, rule in scan_text(text, denylist):
-            findings.add((rel_path, line_no, rule))
+    history_blobs = _read_blobs(repo, [sha for _, _, _, sha in pending_history])
+    for commit_hash, rel_path, mode, sha in pending_history:
+        data = history_blobs.get(sha)
+        if data is None:
+            continue
+        location = f"commit {commit_hash}:{rel_path}"
+        _scan_git_entry(location, rel_path, mode, data, denylist, normalized_deny, findings)
 
     findings.update(_check_identity(repo, denylist))
     return examined, findings

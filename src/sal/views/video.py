@@ -277,10 +277,15 @@ def analyze_video_events(signals: SignalBundle) -> VideoEvents:
         raise ValueError("ffmpeg produced no video frames")
 
     cuts.sort(key=lambda item: item[0])
+    black_filtered = [
+        interval
+        for interval in merge_intervals(black_raw)
+        if interval[1] - interval[0] >= BLACK_MIN_DURATION - 1e-6
+    ]
     return VideoEvents(
         frame_times=frame_times,
         cuts=cuts,
-        black_raw=merge_intervals(black_raw),
+        black_raw=black_filtered,
         frozen_raw=merge_intervals(frozen_raw),
     )
 
@@ -389,7 +394,11 @@ def filmstrip_panel(
     events = signals.video_events()
     in_span = [(idx, pt) for idx, pt in events.frame_times if t0 - 1e-6 <= pt <= t1 + 1e-6]
     if not in_span:
-        raise ValueError("selected span contains no video frames")
+        prior = [item for item in events.frame_times if item[1] <= t0 + 1e-6]
+        if prior:
+            in_span = [max(prior, key=lambda item: (item[1], item[0]))]
+        else:
+            raise ValueError("selected span contains no video frames")
 
     tile_width = requested_tile_width
     tiles = tile_layout(box_x, box_width, tile_width)

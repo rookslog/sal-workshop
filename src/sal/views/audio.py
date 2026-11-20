@@ -65,6 +65,8 @@ def decode_audio_pcm(signals: SignalBundle) -> np.ndarray:
         INPUT_PLACEHOLDER,
         "-map",
         "0:a:0",
+        "-af",
+        "aresample=async=1:first_pts=0",
         "-acodec",
         "pcm_f32le",
         "-f",
@@ -111,7 +113,7 @@ def measure_ebur128(
         "-map",
         "0:a:0",
         "-af",
-        "ebur128=metadata=1,ametadata=mode=print:file=-",
+        "aresample=async=1:first_pts=0,ebur128=metadata=1,ametadata=mode=print:file=-",
         "-f",
         "null",
         "-",
@@ -188,11 +190,18 @@ def waveform_panel(
     samples = signals.audio_samples()
     rate = signals.media.sample_rate
     total_frames = samples.shape[0]
-    start_idx = max(0, min(total_frames, round(t0 * rate)))
-    end_idx = max(start_idx, min(total_frames, round(t1 * rate)))
-    sliced = samples[start_idx:end_idx]
-    if sliced.shape[0] == 0:
+    req_start = max(0, round(t0 * rate))
+    req_end = max(req_start, round(t1 * rate))
+    target_frames = req_end - req_start
+    if target_frames <= 0:
         raise ValueError("selected span contains no audio samples")
+    avail_start = min(total_frames, req_start)
+    avail_end = min(total_frames, req_end)
+    sliced = samples[avail_start:avail_end]
+    if sliced.shape[0] < target_frames:
+        # Pad with silence when the audio stream ends before the container span.
+        pad = np.zeros((target_frames - sliced.shape[0], samples.shape[1]), dtype=samples.dtype)
+        sliced = np.concatenate((sliced, pad), axis=0)
 
     requested_bins = int(params.get("bins", DEFAULT_WAVEFORM_BINS))
     bins = _choose_waveform_bins(t1 - t0, sliced.shape[0], requested_bins)

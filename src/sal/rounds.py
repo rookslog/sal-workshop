@@ -284,11 +284,19 @@ def build_round(round_dir: Path, *, seed: int | None = None) -> tuple[Path, int]
         sha = str(take["sha256"])
         lufs_by_sha[sha] = _measure_integrated_lufs(Path(str(take["path"])))
 
-    min_lufs = min(lufs_by_sha.values())
+    programme_lufs = [lufs for lufs in lufs_by_sha.values() if lufs > -69.0]
     gain_by_sha: dict[str, float] = {}
-    for sha, lufs in lufs_by_sha.items():
-        raw_gain = round(min_lufs - lufs, 2)
-        gain_by_sha[sha] = 0.0 if raw_gain >= 0.0 else raw_gain
+    if not programme_lufs:
+        for sha in lufs_by_sha:
+            gain_by_sha[sha] = 0.0
+    else:
+        min_lufs = min(programme_lufs)
+        for sha, lufs in lufs_by_sha.items():
+            if lufs <= -69.0:
+                gain_by_sha[sha] = 0.0
+            else:
+                raw_gain = round(min_lufs - lufs, 2)
+                gain_by_sha[sha] = 0.0 if raw_gain >= 0.0 else raw_gain
 
     stage_dir = Path(tempfile.mkdtemp(dir=round_dir, prefix=".build-tmp-"))
     try:

@@ -221,6 +221,58 @@ def _draw_png(
     return buf.getvalue()
 
 
+def _write_temp_bytes(directory: Path, prefix: str, data: bytes) -> Path:
+    """Write ``data`` to a new temporary file in ``directory``."""
+    fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=prefix)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return tmp_path
+
+
+def _replace_outputs(out_dir: Path, png_bytes: bytes, json_bytes: bytes) -> tuple[Path, Path]:
+    """Write ``view.png`` and ``view.json`` via temp files without following symlinks."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    png_path = out_dir / "view.png"
+    json_path = out_dir / "view.json"
+    tmp_png = _write_temp_bytes(out_dir, ".view.png.", png_bytes)
+    tmp_json: Path | None = None
+    backup_png: Path | None = None
+    png_replaced = False
+    try:
+        tmp_json = _write_temp_bytes(out_dir, ".view.json.", json_bytes)
+        if os.path.lexists(png_path):
+            fd, backup_name = tempfile.mkstemp(dir=out_dir, prefix=".view.png.bak.")
+            os.close(fd)
+            backup_png = Path(backup_name)
+            os.replace(png_path, backup_png)
+        os.replace(tmp_png, png_path)
+        png_replaced = True
+        os.replace(tmp_json, json_path)
+    except BaseException:
+        if png_replaced or (backup_png is not None and not os.path.lexists(png_path)):
+            if backup_png is not None and os.path.lexists(backup_png):
+                try:
+                    os.replace(backup_png, png_path)
+                except OSError:
+                    pass
+            elif png_replaced:
+                png_path.unlink(missing_ok=True)
+        elif backup_png is not None:
+            backup_png.unlink(missing_ok=True)
+        tmp_png.unlink(missing_ok=True)
+        if tmp_json is not None:
+            tmp_json.unlink(missing_ok=True)
+        raise
+    if backup_png is not None:
+        backup_png.unlink(missing_ok=True)
+    return png_path, json_path
+
+
 def render_view(
     view_name: str,
     input_path: Path,
@@ -303,9 +355,4 @@ def render_view(
     json_bytes = json_text.encode("utf-8")
 
     # Write only after all validation, subprocess calls, and rendering succeed.
-    out_dir.mkdir(parents=True, exist_ok=True)
-    png_path = out_dir / "view.png"
-    json_path = out_dir / "view.json"
-    png_path.write_bytes(png_bytes)
-    json_path.write_bytes(json_bytes)
-    return png_path, json_path
+    return _replace_outputs(out_dir, png_bytes, json_bytes)
