@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sal.build-private/1",
+  "title": "What a build knows that the page must not: the seed, the levels, which shown name is which take",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "round",
+    "seed",
+    "takes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "sal.build-private/1"
+    },
+    "round": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "takes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sha256",
+          "shown",
+          "label",
+          "control",
+          "lufs",
+          "gain_db"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "shown": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "control": {
+            "type": "boolean"
+          },
+          "lufs": {
+            "type": "number"
+          },
+          "gain_db": {
+            "type": "number",
+            "maximum": 0
+          }
+        }
+      }
+    }
+  }
+}

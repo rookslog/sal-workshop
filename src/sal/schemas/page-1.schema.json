@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sal.page/1",
+  "title": "What the review page may know about a round",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "round",
+    "question",
+    "blind",
+    "takes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "sal.page/1"
+    },
+    "round": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "blind": {
+      "type": "boolean"
+    },
+    "takes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "shown",
+          "sha256",
+          "duration",
+          "gain_db",
+          "media",
+          "view"
+        ],
+        "properties": {
+          "shown": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "duration": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "gain_db": {
+            "type": "number",
+            "maximum": 0
+          },
+          "media": {
+            "type": "string",
+            "pattern": "^takes/[0-9a-f]{64}/media\\.[A-Za-z0-9]+$"
+          },
+          "view": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "png",
+              "width",
+              "height",
+              "ruler"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "png": {
+                "type": "string",
+                "pattern": "^takes/[0-9a-f]{64}/[a-z][a-z0-9_]*/view\\.png$"
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "ruler": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "x0",
+                  "x1",
+                  "t0",
+                  "t1"
+                ],
+                "properties": {
+                  "x0": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "x1": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "t0": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "t1": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
