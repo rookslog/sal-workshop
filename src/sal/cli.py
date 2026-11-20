@@ -3,42 +3,21 @@
 import argparse
 import json
 import platform
-import subprocess
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from sal import __version__
-
-
-def _probe_tool_version(tool: str) -> str:
-    """Return the version token from ``<tool> -version``."""
-    try:
-        result = subprocess.run(
-            [tool, "-version"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except OSError as exc:
-        raise RuntimeError(f"{tool} not available: {exc}") from exc
-    if result.returncode != 0:
-        raise RuntimeError(f"{tool} exited with status {result.returncode}")
-    lines = result.stdout.splitlines()
-    if not lines:
-        raise RuntimeError(f"{tool} produced no version output")
-    words = lines[0].split()
-    if len(words) < 3:
-        raise RuntimeError(f"unexpected {tool} version line")
-    return words[2]
+from sal.views import render_view
+from sal.views.media import probe_tool_version
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Report tool and runtime versions."""
     try:
         versions = {
-            "ffmpeg": _probe_tool_version("ffmpeg"),
-            "ffprobe": _probe_tool_version("ffprobe"),
+            "ffmpeg": probe_tool_version("ffmpeg"),
+            "ffprobe": probe_tool_version("ffprobe"),
             "python": platform.python_version(),
             "sal": __version__,
         }
@@ -61,9 +40,21 @@ def _not_implemented() -> int:
 
 
 def _cmd_view_render(args: argparse.Namespace) -> int:
-    """Render a view (stub)."""
-    del args
-    return _not_implemented()
+    """Render a view to PNG and JSON."""
+    out_dir = Path(args.out)
+    try:
+        png_path, json_path = render_view(
+            view_name=args.view,
+            input_path=Path(args.input),
+            out_dir=out_dir,
+            span_arg=args.span,
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(json.dumps({"png": str(png_path), "json": str(json_path)}, sort_keys=True))
+    return 0
 
 
 def _cmd_round_new(args: argparse.Namespace) -> int:
@@ -121,6 +112,19 @@ def _build_parser() -> argparse.ArgumentParser:
     view_parser.set_defaults(help_parser=view_parser)
     view_sub = view_parser.add_subparsers(dest="subcommand")
     view_render_parser = view_sub.add_parser("render", help="Render a view for an input file.")
+    view_render_parser.add_argument("view", metavar="VIEW", help="Name of the view to render.")
+    view_render_parser.add_argument(
+        "--input", required=True, metavar="PATH", help="Input media path."
+    )
+    view_render_parser.add_argument(
+        "--span",
+        default=None,
+        metavar="A:B",
+        help="Optional time span in seconds (default: full file).",
+    )
+    view_render_parser.add_argument(
+        "--out", required=True, metavar="DIR", help="Output directory for view.png and view.json."
+    )
     view_render_parser.set_defaults(func=_cmd_view_render)
 
     round_parser = subparsers.add_parser("round", help="Manage review rounds.")

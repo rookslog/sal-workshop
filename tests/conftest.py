@@ -73,3 +73,41 @@ def run_leak(
         timeout=60,
         check=False,
     )
+
+
+def render(
+    view: str, input_path: Path, out_dir: Path, span: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    args = ["view", "render", view, "--input", str(input_path)]
+    if span is not None:
+        if span.startswith("-"):
+            args.append(f"--span={span}")
+        else:
+            args.extend(["--span", span])
+    return run_sal(*args, "--out", str(out_dir))
+
+
+def load_view(out_dir: Path) -> tuple[str, dict]:
+    import json
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"Non-finite JSON constant: {value}")
+
+    text = (out_dir / "view.json").read_bytes().decode("utf-8")
+    return text, json.loads(text, parse_constant=reject_constant)
+
+
+def _wav_fixture(name: str, segments: list[tuple[float, float, float]]):
+    import pytest
+    from media import make_wav
+
+    @pytest.fixture(scope="module", name=name)
+    def generate(tmp_path_factory: pytest.TempPathFactory) -> Path:
+        return make_wav(tmp_path_factory.mktemp(name) / f"{name}.wav", segments)
+
+    return generate
+
+
+step_wav = _wav_fixture("step_wav", [(5.0, 1000, 0.1), (5.0, 1000, 0.2)])
+burst_wav = _wav_fixture("burst_wav", [(3.0, 0, 0), (0.010, 1000, 0.5), (6.990, 0, 0)])
+silent_wav = _wav_fixture("silent_wav", [(10.0, 0, 0)])
