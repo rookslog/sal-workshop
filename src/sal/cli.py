@@ -8,7 +8,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 from sal import __version__
+from sal.comments import (
+    AGENT_AUTHOR_RE,
+    OPERATOR_KINDS,
+    build_comment_record,
+    filter_inbox_comments,
+    load_comments,
+    load_round_context,
+    parse_comment_span,
+    write_comment,
+)
 from sal.rounds import build_round, create_round
+from sal.server import serve_round
 from sal.views import render_view
 from sal.views.media import probe_tool_version
 
@@ -91,27 +102,116 @@ def _cmd_round_build(args: argparse.Namespace) -> int:
 
 
 def _cmd_round_serve(args: argparse.Namespace) -> int:
-    """Serve a review round locally (stub)."""
-    del args
-    return _not_implemented()
+    """Serve a review round locally over HTTP on 127.0.0.1."""
+    try:
+        return serve_round(Path(args.round_dir), port=args.port)
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def _cmd_comment_add(args: argparse.Namespace) -> int:
-    """Add a review comment (stub)."""
-    del args
-    return _not_implemented()
+    """Add a review comment to ``records/comments/``."""
+    root = Path(".")
+    try:
+        if args.channel != "chat-transcribed":
+            raise ValueError(
+                f"invalid channel {args.channel!r}: only 'chat-transcribed' is accepted"
+            )
+        if args.kind not in OPERATOR_KINDS:
+            allowed = ", ".join(sorted(OPERATOR_KINDS))
+            raise ValueError(f"invalid kind {args.kind!r}: expected one of {allowed}")
+
+        round_dir = root / "rounds" / args.round
+        round_id, duration_by_sha, label_shown_by_sha = load_round_context(round_dir)
+        if args.take not in duration_by_sha:
+            raise ValueError(f"take {args.take!r} is not part of round {round_id!r}")
+
+        start, end = parse_comment_span(args.span, duration_by_sha[args.take])
+
+        if args.answers is not None or args.replaces is not None:
+            existing_ids = {comment["id"] for comment in load_comments(root)}
+            if args.answers is not None and args.answers not in existing_ids:
+                raise ValueError(f"referenced --answers comment does not exist: {args.answers}")
+            if args.replaces is not None and args.replaces not in existing_ids:
+                raise ValueError(f"referenced --replaces comment does not exist: {args.replaces}")
+
+        record = build_comment_record(
+            round_id=round_id,
+            sha256=args.take,
+            label_shown=label_shown_by_sha[args.take],
+            start=start,
+            end=end,
+            kind=args.kind,
+            text=args.text,
+            author=args.author,
+            channel=args.channel,
+            answers=args.answers,
+            replaces=args.replaces,
+        )
+        write_comment(root, record)
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(json.dumps({"comment": record["id"]}, sort_keys=True))
+    return 0
 
 
 def _cmd_comment_answer(args: argparse.Namespace) -> int:
-    """Answer a review comment (stub)."""
-    del args
-    return _not_implemented()
+    """Write an agent answer referencing an existing comment."""
+    root = Path(".")
+    try:
+        if not AGENT_AUTHOR_RE.fullmatch(args.author):
+            raise ValueError(f"invalid author {args.author!r}: expected agent:<harness>/<model>")
+        if not args.text.strip():
+            raise ValueError("answer text must not be empty")
+
+        existing = load_comments(root)
+        target = next((comment for comment in existing if comment["id"] == args.id), None)
+        if target is None:
+            raise ValueError(f"comment does not exist: {args.id}")
+
+        record = build_comment_record(
+            round_id=target["round"],
+            sha256=target["take"]["sha256"],
+            label_shown=target["take"]["label_shown"],
+            start=float(target["span"]["start"]),
+            end=float(target["span"]["end"]),
+            kind="answer",
+            text=args.text,
+            author=args.author,
+            channel="agent",
+            answers=target["id"],
+        )
+        write_comment(root, record)
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(json.dumps({"comment": record["id"]}, sort_keys=True))
+    return 0
 
 
 def _cmd_inbox(args: argparse.Namespace) -> int:
-    """Show pending review items (stub)."""
-    del args
-    return _not_implemented()
+    """List pending operator comments not yet answered or replaced."""
+    root = Path(".")
+    try:
+        pending = filter_inbox_comments(load_comments(root), round_id=args.round)
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(pending, ensure_ascii=False, allow_nan=False))
+    else:
+        for item in pending:
+            preview = item["text"].replace("\r", " ").replace("\n", " ")
+            print(
+                f"{item['id']} [{item['round']}] {item['kind']} "
+                f"({item['take']['label_shown']} @ {item['span']['start']:.3f}s): {preview}"
+            )
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -195,17 +295,73 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     round_build_parser.set_defaults(func=_cmd_round_build)
     round_serve_parser = round_sub.add_parser("serve", help="Serve a review round.")
+    round_serve_parser.add_argument(
+        "round_dir", metavar="ROUND_DIR", help="Path to the round directory."
+    )
+    round_serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        metavar="N",
+        help="Port on 127.0.0.1 (default: 8765; 0 picks a free port).",
+    )
     round_serve_parser.set_defaults(func=_cmd_round_serve)
 
     comment_parser = subparsers.add_parser("comment", help="Manage review comments.")
     comment_parser.set_defaults(help_parser=comment_parser)
     comment_sub = comment_parser.add_subparsers(dest="subcommand")
     comment_add_parser = comment_sub.add_parser("add", help="Add a review comment.")
+    comment_add_parser.add_argument(
+        "--round", required=True, metavar="ID", help="Round identifier."
+    )
+    comment_add_parser.add_argument(
+        "--take", required=True, metavar="SHA256", help="SHA-256 of the take."
+    )
+    comment_add_parser.add_argument(
+        "--span", default=None, metavar="A:B", help="Optional time span A:B in seconds."
+    )
+    comment_add_parser.add_argument(
+        "--kind",
+        required=True,
+        metavar="K",
+        help="Comment kind (flag, question, request, verdict).",
+    )
+    comment_add_parser.add_argument("--text", required=True, metavar="T", help="Comment text.")
+    comment_add_parser.add_argument(
+        "--author", default="operator", metavar="AUTHOR", help="Author (default: operator)."
+    )
+    comment_add_parser.add_argument(
+        "--channel",
+        default="chat-transcribed",
+        metavar="CHANNEL",
+        help="Channel (default: chat-transcribed).",
+    )
+    comment_add_parser.add_argument(
+        "--answers", default=None, metavar="ID", help="Existing comment id this comment answers."
+    )
+    comment_add_parser.add_argument(
+        "--replaces", default=None, metavar="ID", help="Existing comment id this comment replaces."
+    )
     comment_add_parser.set_defaults(func=_cmd_comment_add)
+
     comment_answer_parser = comment_sub.add_parser("answer", help="Answer a review comment.")
+    comment_answer_parser.add_argument("id", metavar="ID", help="Comment id to answer.")
+    comment_answer_parser.add_argument("--text", required=True, metavar="T", help="Answer text.")
+    comment_answer_parser.add_argument(
+        "--author",
+        required=True,
+        metavar="AGENT",
+        help="Agent author as agent:<harness>/<model>.",
+    )
     comment_answer_parser.set_defaults(func=_cmd_comment_answer)
 
     inbox_parser = subparsers.add_parser("inbox", help="List open comments and questions.")
+    inbox_parser.add_argument(
+        "--round", default=None, metavar="ID", help="Filter pending comments to one round."
+    )
+    inbox_parser.add_argument(
+        "--json", action="store_true", help="Emit pending records as one JSON array line."
+    )
     inbox_parser.set_defaults(func=_cmd_inbox)
 
     return parser

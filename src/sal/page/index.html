@@ -221,6 +221,24 @@
       pointer-events: none;
     }
 
+    .comment-mark {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: rgba(217, 119, 6, 0.22);
+      border-left: 1.5px solid #d97706;
+      border-right: 1.5px solid #d97706;
+      pointer-events: none;
+    }
+
+    .comment-mark.comment-mark-moment {
+      width: 4px;
+      border-left: none;
+      border-right: none;
+      background: rgba(217, 119, 6, 0.75);
+      transform: translateX(-50%);
+    }
+
     .playhead {
       position: absolute;
       top: 0;

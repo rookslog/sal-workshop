@@ -411,3 +411,225 @@ def _browser_helpers():
 
 
 open_page, view_x = _browser_helpers()
+
+
+def _server_helpers():
+    import json
+    import re
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from select import select
+    from time import monotonic
+
+    def first_line(stream) -> bytes:
+        deadline = monotonic() + 5
+        pending = bytearray()
+        while True:
+            remaining = max(0, deadline - monotonic())
+            assert select([stream], [], [], remaining)[0], "round serve did not flush its URL"
+            chunk = os.read(stream.fileno(), 4096)
+            assert chunk, "round serve closed stdout before announcing its URL"
+            pending.extend(chunk)
+            if b"\n" in pending:
+                return pending.partition(b"\n")[0]
+            assert monotonic() < deadline, "round serve did not print a complete first line"
+
+    @contextmanager
+    def serve_process(round_dir: Path) -> Iterator[tuple[subprocess.Popen[bytes], dict]]:
+        root = round_dir.parent.parent
+        with subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "sal",
+                "round",
+                "serve",
+                str(round_dir.relative_to(root)),
+                "--port",
+                "0",
+            ],
+            cwd=root,
+            stdout=subprocess.PIPE,
+        ) as process:
+            try:
+                assert process.stdout is not None
+                announcement = json.loads(first_line(process.stdout))
+                yield process, announcement
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
+    @contextmanager
+    def served(round_dir: Path) -> Iterator[tuple[str, Path]]:
+        with serve_process(round_dir) as (_, announcement):
+            assert isinstance(announcement, dict)
+            url = announcement["url"]
+            assert re.fullmatch(r"http://127\.0\.0\.1:[0-9]+/", url)
+            yield url, round_dir.parent.parent
+
+    return serve_process, served
+
+
+serve_process, served = _server_helpers()
+
+
+def http(
+    method: str,
+    url: str,
+    body: bytes | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    from urllib.error import HTTPError
+    from urllib.parse import urlsplit
+    from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    target = urlsplit(url)
+    assert target.scheme == "http" and target.hostname == "127.0.0.1"
+    opener = build_opener(ProxyHandler({}), NoRedirect())
+    request = Request(url, data=body, headers=dict(headers or {}), method=method)
+    try:
+        response = opener.open(request, timeout=5)
+    except HTTPError as error:
+        response = error
+    with response:
+        return (
+            response.status,
+            {key.lower(): value for key, value in response.headers.items()},
+            response.read(),
+        )
+
+
+def comment_paths(root: Path) -> list[Path]:
+    directory = root / "records" / "comments"
+    if not directory.exists():
+        return []
+    return sorted(path for path in directory.iterdir() if path.is_file())
+
+
+def comment_files(root: Path) -> list[dict]:
+    return [read_json(path) for path in comment_paths(root)]
+
+
+def comment_record(
+    *, round_id: str = "r1", sha256: str = "1" * 64, text: str = "  keep this  "
+) -> dict:
+    return {
+        "schema": "sal.comment/1",
+        "id": "",
+        "created": "2026-11-20T10:15:00Z",
+        "round": round_id,
+        "take": {"sha256": sha256, "label_shown": "zebra-first"},
+        "span": {"start": 3.0, "end": 5.0},
+        "kind": "flag",
+        "text": text,
+        "author": "operator",
+        "channel": "page",
+        "answers": None,
+        "replaces": None,
+    }
+
+
+def _comment_round_fixtures():
+    import shutil
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+
+    import pytest
+
+    @pytest.fixture(scope="module")
+    def built_comment_round(
+        tmp_path_factory: pytest.TempPathFactory, take_low_mp4: Path, take_high_mp4: Path
+    ) -> Path:
+        return make_round(tmp_path_factory.mktemp("comment-round"), (take_low_mp4, take_high_mp4))
+
+    @contextmanager
+    def clean_comment_round(round_dir: Path) -> Iterator[Path]:
+        records = round_dir.parent.parent / "records"
+        assert not records.exists()
+        try:
+            yield round_dir
+        finally:
+            if records.exists():
+                shutil.rmtree(records)
+
+    @pytest.fixture
+    def comment_round(built_comment_round: Path) -> Iterator[Path]:
+        with clean_comment_round(built_comment_round) as round_dir:
+            yield round_dir
+
+    @pytest.fixture
+    def blind_comment_round(blind_round: Path) -> Iterator[Path]:
+        with clean_comment_round(blind_round) as round_dir:
+            yield round_dir
+
+    return built_comment_round, comment_round, blind_comment_round
+
+
+built_comment_round, comment_round, blind_comment_round = _comment_round_fixtures()
+
+
+def _served_page_helper():
+    import re
+    from typing import TYPE_CHECKING
+    from urllib.parse import urlsplit
+
+    if TYPE_CHECKING:
+        from playwright.sync_api import ConsoleMessage, Page, Playwright, Route, WebSocketRoute
+
+    def open_served_page(
+        playwright: "Playwright", browser_name: str, url: str
+    ) -> tuple["Page", list[str], list[str], list[str]]:
+        origin = urlsplit(url)
+        assert origin.scheme == "http" and origin.hostname == "127.0.0.1"
+        options = {"args": ["--mute-audio"]} if browser_name == "chromium" else {}
+        browser = getattr(playwright, browser_name).launch(headless=True, **options)
+        console_errors: list[str] = []
+        page_errors: list[str] = []
+        requests: list[str] = []
+
+        def block_request(route: "Route") -> None:
+            route.abort()
+
+        def block_socket(socket: "WebSocketRoute") -> None:
+            requests.append(socket.url)
+            socket.close()
+
+        def collect_console_error(message: "ConsoleMessage") -> None:
+            if message.type == "error":
+                console_errors.append(message.text)
+
+        try:
+            context = browser.new_context(service_workers="block")
+            origin_prefix = f"{origin.scheme}://{origin.netloc}/"
+            context.route(re.compile(rf"^(?!{re.escape(origin_prefix)})"), block_request)
+            context.route_web_socket("**/*", block_socket)
+            page = context.new_page()
+            page.on("console", collect_console_error)
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            context.on("request", lambda request: requests.append(request.url))
+            page.goto(url)
+            page.wait_for_function(
+                """() => {
+                    const videos = Array.from(document.querySelectorAll('video'));
+                    return videos.length > 0 && videos.every(video => video.readyState >= 2);
+                }""",
+                timeout=10_000,
+            )
+        except BaseException:
+            browser.close()
+            raise
+        return page, console_errors, page_errors, requests
+
+    return open_served_page
+
+
+open_served_page = _served_page_helper()

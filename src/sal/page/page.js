@@ -29,8 +29,12 @@
   const commentCancelEl = document.getElementById("comment-cancel");
   const commentStatusEl = document.getElementById("comment-status");
 
+  const isServed = window.location.protocol === "http:";
+
   let activeIndex = 1;
   let selection = null; // { index, sha256, start, end }
+  let commentTarget = null; // { sha256, start, end }
+  let isSaving = false;
   let loopActive = false;
   let rafId = null;
 
@@ -133,14 +137,75 @@
     }
   }
 
-  function setOfflineStatus() {
+  function setCommentStatus(state, message, saveDisabled) {
     if (commentStatusEl) {
-      commentStatusEl.setAttribute("data-state", "offline");
-      commentStatusEl.textContent = "Offline: comments cannot be saved.";
+      commentStatusEl.setAttribute("data-state", state);
+      commentStatusEl.textContent = message;
     }
     if (commentSaveEl) {
-      commentSaveEl.disabled = true;
+      commentSaveEl.disabled = saveDisabled;
     }
+  }
+
+  function setOfflineStatus() {
+    setCommentStatus("offline", "Offline: comments cannot be saved.", true);
+  }
+
+  function renderCommentMarks(records) {
+    if (!Array.isArray(records)) {
+      return;
+    }
+    for (const row of rows) {
+      row.marks.textContent = "";
+    }
+    for (const record of records) {
+      if (!record || typeof record !== "object") {
+        continue;
+      }
+      if (pageData.round && record.round !== pageData.round) {
+        continue;
+      }
+      if (!record.id || !record.take || !record.span) {
+        continue;
+      }
+      const row = rows.find((item) => item.take.sha256 === record.take.sha256);
+      if (!row) {
+        continue;
+      }
+      const start = Number(record.span.start);
+      const end = Number(record.span.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {
+        continue;
+      }
+      const view = row.take.view;
+      const ruler = view.ruler;
+      const xStartPx = timeToX(clamp(start, ruler.t0, ruler.t1), ruler);
+      const xEndPx = timeToX(clamp(end, ruler.t0, ruler.t1), ruler);
+      const markEl = document.createElement("div");
+      markEl.setAttribute("data-id", String(record.id));
+      if (end <= start || Math.abs(xEndPx - xStartPx) < 1) {
+        markEl.className = "comment-mark comment-mark-moment";
+        markEl.style.left = `${(xStartPx / view.width) * 100}%`;
+      } else {
+        markEl.className = "comment-mark";
+        markEl.style.left = `${(xStartPx / view.width) * 100}%`;
+        markEl.style.width = `${((xEndPx - xStartPx) / view.width) * 100}%`;
+      }
+      row.marks.append(markEl);
+    }
+  }
+
+  async function fetchAndRenderComments() {
+    const response = await fetch("comments", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`GET comments failed: ${response.status}`);
+    }
+    const records = await response.json();
+    if (!Array.isArray(records)) {
+      throw new Error("Invalid comments payload");
+    }
+    renderCommentMarks(records);
+    return records;
   }
 
   function openCommentBox(row, start, end) {
@@ -149,6 +214,11 @@
     }
     const startStr = formatTime(start);
     const endStr = formatTime(end);
+    commentTarget = {
+      sha256: row.take.sha256,
+      start: Number(startStr),
+      end: Number(endStr),
+    };
     commentBoxEl.setAttribute("data-start", startStr);
     commentBoxEl.setAttribute("data-end", endStr);
     commentBoxEl.setAttribute("data-sha256", row.take.sha256);
@@ -159,8 +229,50 @@
         commentTargetEl.textContent = `${row.take.shown} @ ${startStr}s – ${endStr}s`;
       }
     }
-    setOfflineStatus();
+    if (isServed) {
+      setCommentStatus("ready", "", false);
+    } else {
+      setOfflineStatus();
+    }
     commentBoxEl.hidden = false;
+  }
+
+  async function saveComment() {
+    if (!isServed || !commentTarget || isSaving) {
+      return;
+    }
+    isSaving = true;
+    setCommentStatus("saving", "Saving...", true);
+    const payload = {
+      sha256: commentTarget.sha256,
+      start: commentTarget.start,
+      end: commentTarget.end,
+      kind: commentKindEl ? commentKindEl.value : "flag",
+      text: commentTextEl ? commentTextEl.value : "",
+    };
+    try {
+      const postResponse = await fetch("comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (postResponse.status !== 201) {
+        throw new Error(`POST comments failed: ${postResponse.status}`);
+      }
+      await fetchAndRenderComments();
+      if (commentTextEl) {
+        commentTextEl.value = "";
+      }
+      if (commentKindEl) {
+        commentKindEl.value = "flag";
+      }
+      closeCommentBox();
+      setCommentStatus("saved", "Saved.", false);
+    } catch (_err) {
+      setCommentStatus("error", "Could not save comment.", false);
+    } finally {
+      isSaving = false;
+    }
   }
 
   function closeCommentBox() {
@@ -470,6 +582,9 @@
     imgEl.alt = `${take.shown} view`;
     imgEl.draggable = false;
 
+    const marksEl = document.createElement("div");
+    marksEl.className = "comment-marks";
+
     const selectionEl = document.createElement("div");
     selectionEl.className = "selection";
     selectionEl.hidden = true;
@@ -477,7 +592,7 @@
     const playheadEl = document.createElement("div");
     playheadEl.className = "playhead";
 
-    viewEl.append(imgEl, selectionEl, playheadEl);
+    viewEl.append(imgEl, marksEl, selectionEl, playheadEl);
     rowEl.append(mediaCol, viewEl);
     takesRoot.append(rowEl);
 
@@ -488,6 +603,7 @@
       video: videoEl,
       view: viewEl,
       img: imgEl,
+      marks: marksEl,
       selection: selectionEl,
       playhead: playheadEl,
     };
@@ -533,6 +649,11 @@
   }
   if (commentCancelEl) {
     commentCancelEl.addEventListener("click", closeCommentBox);
+  }
+  if (commentSaveEl) {
+    commentSaveEl.addEventListener("click", () => {
+      void saveComment();
+    });
   }
   window.addEventListener("resize", updateAllPlayheads);
 
@@ -583,7 +704,12 @@
     }
   });
 
-  setOfflineStatus();
+  if (isServed) {
+    setCommentStatus("ready", "", false);
+    fetchAndRenderComments().catch(() => {});
+  } else {
+    setOfflineStatus();
+  }
   updateMuteAndActive();
   updateVolumes();
   updateLoopStatus();
