@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sal.view/1",
+  "title": "A rendered view: the ruler, the panels and what each panel drew",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "view", "input", "span", "image", "ruler", "panels", "commands", "tool"],
+  "properties": {
+    "schema": {"const": "sal.view/1"},
+    "view": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "duration"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "duration": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "number", "minimum": 0},
+        "end": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "width", "height"],
+      "properties": {
+        "file": {"const": "view.png"},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1}
+      }
+    },
+    "ruler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x0", "x1", "t0", "t1", "ticks"],
+      "properties": {
+        "x0": {"type": "integer", "minimum": 0},
+        "x1": {"type": "integer", "minimum": 1},
+        "t0": {"type": "number", "minimum": 0},
+        "t1": {"type": "number", "exclusiveMinimum": 0},
+        "ticks": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["t", "x", "label"],
+            "properties": {
+              "t": {"type": "number"},
+              "x": {"type": "number"},
+              "label": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
+    "panels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/panel"}
+    },
+    "commands": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sal", "ffmpeg"],
+      "properties": {"sal": {"type": "string"}, "ffmpeg": {"type": "string"}}
+    }
+  },
+  "$defs": {
+    "times": {"type": "array", "items": {"type": "number"}},
+    "panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "box", "params", "data"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "box": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"type": "integer", "minimum": 0}
+        },
+        "params": {"type": "object"},
+        "data": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"name": {"const": "waveform"}}},
+          "then": {
+            "properties": {
+              "data": {
+                "additionalProperties": false,
+                "required": ["t", "series"],
+                "properties": {
+                  "t": {"$ref": "#/$defs/times"},
+                  "series": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["peak"],
+                    "properties": {
+                      "peak": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0, "maximum": 1}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"name": {"const": "loudness"}}},
+          "then": {
+            "properties": {
+              "data": {
+                "additionalProperties": false,
+                "required": ["t", "series"],
+                "properties": {
+                  "t": {"$ref": "#/$defs/times"},
+                  "series": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["momentary", "short_term"],
+                    "properties": {
+                      "momentary": {"type": "array", "items": {"type": ["number", "null"]}},
+                      "short_term": {"type": "array", "items": {"type": ["number", "null"]}}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"name": {"const": "filmstrip"}}},
+          "then": {
+            "properties": {
+              "data": {
+                "additionalProperties": false,
+                "required": ["frames"],
+                "properties": {
+                  "frames": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["t", "x", "width"],
+                      "properties": {
+                        "t": {"type": "number", "minimum": 0},
+                        "x": {"type": "integer", "minimum": 0},
+                        "width": {"type": "integer", "minimum": 1}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"name": {"const": "cuts"}}},
+          "then": {
+            "properties": {
+              "data": {
+                "additionalProperties": false,
+                "required": ["events"],
+                "properties": {
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["t", "score"],
+                      "properties": {
+                        "t": {"type": "number", "minimum": 0},
+                        "score": {"type": "number", "minimum": 0}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"name": {"const": "black_frozen"}}},
+          "then": {
+            "properties": {
+              "data": {
+                "additionalProperties": false,
+                "required": ["intervals"],
+                "properties": {
+                  "intervals": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["start", "end", "kind"],
+                      "properties": {
+                        "start": {"type": "number", "minimum": 0},
+                        "end": {"type": "number", "minimum": 0},
+                        "kind": {"enum": ["black", "frozen"]}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
