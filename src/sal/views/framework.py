@@ -18,6 +18,7 @@ from sal import __version__
 from sal.views.audio import decode_audio_pcm, measure_ebur128
 from sal.views.media import CommandRecorder, MediaInfo, probe_media, probe_tool_version
 from sal.views.ruler import Ruler, make_ticks
+from sal.views.video import VideoEvents, analyze_video_events
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -81,6 +82,7 @@ class SignalBundle:
         self.recorder = recorder
         self._audio_samples: np.ndarray | None = None
         self._ebur128: tuple[list[float], list[float | None], list[float | None]] | None = None
+        self._video_events: VideoEvents | None = None
 
     def audio_samples(self) -> np.ndarray:
         """Return cached decoded PCM float32 audio samples shaped ``(n, channels)``."""
@@ -93,6 +95,12 @@ class SignalBundle:
         if self._ebur128 is None:
             self._ebur128 = measure_ebur128(self)
         return self._ebur128
+
+    def video_events(self) -> VideoEvents:
+        """Return cached frame timestamps, cuts, black, and freeze detections."""
+        if self._video_events is None:
+            self._video_events = analyze_video_events(self)
+        return self._video_events
 
 
 VIEWS: dict[str, ViewSpec] = {}

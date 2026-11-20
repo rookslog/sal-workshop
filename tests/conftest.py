@@ -111,3 +111,62 @@ def _wav_fixture(name: str, segments: list[tuple[float, float, float]]):
 step_wav = _wav_fixture("step_wav", [(5.0, 1000, 0.1), (5.0, 1000, 0.2)])
 burst_wav = _wav_fixture("burst_wav", [(3.0, 0, 0), (0.010, 1000, 0.5), (6.990, 0, 0)])
 silent_wav = _wav_fixture("silent_wav", [(10.0, 0, 0)])
+
+
+RED = (200, 40, 40)
+GREEN = (40, 200, 40)
+BLUE = (40, 40, 200)
+YELLOW = (200, 200, 40)
+
+
+def _video_fixtures():
+    import pytest
+    from media import make_video, make_wav
+
+    @pytest.fixture(scope="module")
+    def av_mp4(tmp_path_factory: pytest.TempPathFactory) -> Path:
+        directory = tmp_path_factory.mktemp("av")
+        audio = make_wav(directory / "av.wav", [(6.0, 1000, 0.1), (6.0, 1000, 0.2)])
+        return make_video(
+            directory / "av.mp4",
+            [
+                ("move", 75, RED),
+                ("move", 50, GREEN),
+                ("black", 25),
+                ("move", 50, BLUE),
+                ("freeze", 25),
+                ("move", 25, BLUE),
+                ("move", 50, YELLOW),
+            ],
+            audio=audio,
+        )
+
+    @pytest.fixture(scope="module")
+    def ntsc_mp4(tmp_path_factory: pytest.TempPathFactory) -> Path:
+        directory = tmp_path_factory.mktemp("ntsc")
+        audio = make_wav(directory / "ntsc.wav", [(4.004, 1000, 0.1)])
+        return make_video(
+            directory / "ntsc.mp4",
+            [("move", 48, RED), ("move", 48, GREEN)],
+            fps="24000/1001",
+            audio=audio,
+        )
+
+    @pytest.fixture(scope="module")
+    def av_render(
+        tmp_path_factory: pytest.TempPathFactory, av_mp4: Path
+    ) -> tuple[Path, subprocess.CompletedProcess[str]]:
+        out_dir = tmp_path_factory.mktemp("av-render") / "out"
+        return out_dir, render("av_transition", av_mp4, out_dir)
+
+    @pytest.fixture(scope="module")
+    def av_view(av_render: tuple[Path, subprocess.CompletedProcess[str]]) -> tuple[Path, dict, str]:
+        out_dir, process = av_render
+        assert process.returncode == 0, process.stderr
+        text, view = load_view(out_dir)
+        return out_dir, view, text
+
+    return av_mp4, ntsc_mp4, av_render, av_view
+
+
+av_mp4, ntsc_mp4, av_render, av_view = _video_fixtures()
